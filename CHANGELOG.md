@@ -3,7 +3,7 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
-## Unreleased (v0.2.0)
+## v0.2.0
 
 Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.2):
 
