@@ -72,14 +72,13 @@ func (p Product) Check() error {
 	case !filepath.IsAbs(p.Root):
 		return fmt.Errorf("field Root %q: an absolute folder", p.Root)
 	}
-	for field, name := range map[string]string{"Template": p.Template, "Schema": p.Schema} {
-		if !sqlName.MatchString(name) || name == admin {
-			return fmt.Errorf("field %s %q: a lowercase SQL name other than %s", field, name, admin)
-		}
-	}
+	fields := []struct{ field, name string }{{"Template", p.Template}, {"Schema", p.Schema}}
 	for _, login := range p.Logins {
-		if !sqlName.MatchString(login) || login == admin {
-			return fmt.Errorf("field Logins: %q is not a lowercase SQL name other than %s", login, admin)
+		fields = append(fields, struct{ field, name string }{"Logins", login})
+	}
+	for _, f := range fields {
+		if !sqlName.MatchString(f.name) || f.name == admin {
+			return fmt.Errorf("field %s %q: a lowercase SQL name other than %s", f.field, f.name, admin)
 		}
 	}
 	return nil
@@ -89,8 +88,11 @@ func (p Product) Check() error {
 // (the lost-commit tests' relay).
 const PlaintextPrefix = "lostcommit_"
 
+// Administrator is the server's superuser, the image's own.
+const Administrator = "postgres"
+
 const (
-	admin = "postgres"
+	admin = Administrator
 	// cloneLock serializes CREATE DATABASE … TEMPLATE, which fails while another copy of the template runs.
 	cloneLock = 7_150_001
 )
@@ -288,7 +290,7 @@ func (d *Database) RestoreLikeInfra(t testing.TB, logins ...string) *Database {
 	t.Cleanup(func() { target.drop(t) })
 	statements := []string{
 		"COPY (SELECT 1) TO PROGRAM 'pg_dump --format=custom --file=" + dump + " --dbname=" + d.Name + "'",
-		"CREATE DATABASE " + target.Name + " OWNER postgres TEMPLATE template0 ALLOW_CONNECTIONS false",
+		"CREATE DATABASE " + target.Name + " OWNER " + admin + " TEMPLATE template0 ALLOW_CONNECTIONS false",
 		"REVOKE ALL ON DATABASE " + target.Name + " FROM PUBLIC",
 		"GRANT CONNECT ON DATABASE " + target.Name + " TO " + strings.Join(logins, ", "),
 		"ALTER DATABASE " + target.Name + " ALLOW_CONNECTIONS true",
@@ -434,9 +436,9 @@ func (a *Authority) PEM() string {
 	return a.pem
 }
 
-// ServerCertificate issues the servers' certificate for the addresses a client dials (127.0.0.1, ::1,
-// host.docker.internal, the names the test services have on their own network) and the given names, and deliberately
-// not localhost, so dialling localhost is a wrong-name case.
+// ServerCertificate issues a server certificate for the loopback addresses (127.0.0.1, ::1), host.docker.internal
+// (where containers reach this machine) and the given names, and deliberately not localhost, so dialling localhost is
+// a wrong-name case.
 func (a *Authority) ServerCertificate(names ...string) (certPEM, keyPEM string, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -445,7 +447,7 @@ func (a *Authority) ServerCertificate(names ...string) (certPEM, keyPEM string, 
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "test server"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(10, 0, 0),
-		DNSNames:    append([]string{"host.docker.internal", "postgres", "idp.test"}, names...),
+		DNSNames:    append([]string{"host.docker.internal"}, names...),
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		KeyUsage:    x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

@@ -35,9 +35,10 @@ The services are `postgres` (container port 5432) and, with a realm folder, `key
 
 ## Development
 
-`make fix` formats and tidies; `make qa` runs every check: format, vet, lint, `go mod tidy -diff`, the unit and
-database tests under the module's own runner (`make unit`), the runner as a real process (`make stack`), and one
-Keycloak start (`make keycloak`). The tests need Docker. `make flake TESTS=<regexp>` repeats tests; `make mutate`
+`make fix` formats and tidies; `make qa` runs every check: format, vet, lint, `go mod tidy -diff`, the check that no Go
+or YAML file names a product (`make names`), the unit, database and Keycloak tests on one stack under the module's own
+runner (`make tests`; `make unit` and `make keycloak` run them apart), and the runner as a real process (`make
+stack`). The tests need Docker. `make flake TESTS=<regexp>` repeats tests; `make mutate`
 runs mutation testing on the lines changed since `origin/main`.
 
 **Developing commons together with a product.** The workspace root holds an ignored workspace file, `commons.work`

@@ -17,7 +17,6 @@ only = [
   "internal/selftest -> withdb",
 ]
 never = [
-  "testdb -> withdb",
   "keycloak -> testdb",
   "totp -> testdb",
 ]

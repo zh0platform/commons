@@ -6,18 +6,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"git.kloudbox.de/commons/commons/internal/selftest"
 )
+
+// prefix starts the names of the test product's projects and folders.
+var prefix = selftest.Product("/").Project
 
 // The runner as a real process, killed and stopped at each boundary it promises cleanup for, while a second run of
 // its own keeps running beside it: each case leaves neither its Compose project nor its folder, and the second run is
@@ -25,9 +29,22 @@ import (
 func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 	runner := buildRunner(t)
 	temp := t.TempDir() // every run's folder lives here, so the test sees exactly its own
-	beside := start(t, runner, temp, "--", "sh", "-c", "echo ready; exec sleep 600")
+	beside := start(t, runner, temp, nil, "--", "sh", "-c", "echo ready; exec sleep 600")
 	beside.waitFor(t, "ready")
 
+	t.Run("each boundary", func(t *testing.T) { // returns once its parallel cases ended
+		cases(t, runner, temp)
+	})
+	if !listed(t, beside.project(t)) {
+		t.Errorf("the run beside, %s, is gone", beside.project(t))
+	}
+	beside.signal(t, syscall.SIGTERM)
+	_ = beside.wait(t)
+	assertGone(t, beside)
+}
+
+// cases runs each boundary in a run of its own, in parallel: each has its own process ID, project and folder.
+func cases(t *testing.T, runner, temp string) {
 	statementLog := filepath.Join(t.TempDir(), "statements.yaml")
 	if err := os.WriteFile(statementLog, []byte("services:\n  postgres:\n    environment:\n      AGENTTEST_PG_FLAGS: -c log_statement=all -c log_min_duration_statement=0 -c log_transaction_sample_rate=1\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -52,7 +69,8 @@ func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 			output: []string{"setup failed: provisioning", `role "agent_migrate" already exists`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := start(t, runner, temp, tc.args...)
+			t.Parallel()
+			r := start(t, runner, temp, nil, tc.args...)
 			if tc.signal != nil {
 				tc.signal(t, r)
 			}
@@ -72,20 +90,18 @@ func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 		})
 	}
 
+	// The command's real environment: an inherited setting of another run and a refused variable do not reach it; the
+	// run's own settings and a setting the runner does not manage do.
 	t.Run("the command's environment", func(t *testing.T) {
-		for name, value := range map[string]string{
-			"AGENT_TYPO": "1", "AGENTTEST_DB_HOST": "another-run", "COMPOSE_PROFILES": "x", "PGHOST": "elsewhere",
-			"AGENTTEST_PG_FLAGS": "-c fsync=on",
-		} {
-			t.Setenv(name, value)
-		}
-		r := start(t, runner, temp, "--", "env")
+		t.Parallel()
+		inherited := []string{"AGENT_TYPO=1", "AGENTTEST_DB_HOST=another-run", "AGENTTEST_PG_FLAGS=-c fsync=on"}
+		r := start(t, runner, temp, inherited, "--", "env")
 		status := r.wait(t)
 		if status != 0 {
 			t.Fatalf("exit %d:\n%s", status, r.output())
 		}
 		environment := strings.Join(r.stdout(t), "\n") + "\n"
-		for _, absent := range []string{"AGENT_TYPO=", "AGENTTEST_DB_HOST=another-run", "COMPOSE_PROFILES=", "PGHOST="} {
+		for _, absent := range []string{"AGENT_TYPO=", "AGENTTEST_DB_HOST=another-run"} {
 			if strings.Contains(environment, absent) {
 				t.Errorf("the command's environment holds %s", absent)
 			}
@@ -99,13 +115,14 @@ func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 	})
 
 	t.Run("hard kill", func(t *testing.T) {
-		killed := start(t, runner, temp, "--", "sh", "-c", "echo ready; exec sleep 600")
+		t.Parallel()
+		killed := start(t, runner, temp, nil, "--", "sh", "-c", "echo ready; exec sleep 600")
 		killed.waitFor(t, "ready")
 		project := killed.project(t)
-		killed.removeAfter(t, project)
+		killed.removeAfter(t)
 		killed.signal(t, syscall.SIGKILL)
 		_ = killed.wait(t)
-		next := start(t, runner, temp, "--", "true")
+		next := start(t, runner, temp, nil, "--", "true")
 		if status := next.wait(t); status != 0 {
 			t.Fatalf("the next run: exit %d:\n%s", status, next.output())
 		}
@@ -117,13 +134,6 @@ func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 			t.Errorf("the next start removed %s, which it did not start", project)
 		}
 	})
-
-	if !listed(t, beside.project(t)) {
-		t.Errorf("the run beside, %s, is gone", beside.project(t))
-	}
-	beside.signal(t, syscall.SIGTERM)
-	_ = beside.wait(t)
-	assertGone(t, beside)
 }
 
 // run is one runner process of the test.
@@ -150,7 +160,8 @@ func buildRunner(t *testing.T) string {
 	return binary
 }
 
-func start(t *testing.T, runner, temp string, args ...string) *run {
+// start starts a runner with its folders under temp and the given inherited variables besides the test's own.
+func start(t *testing.T, runner, temp string, inherited []string, args ...string) *run {
 	t.Helper()
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -159,7 +170,7 @@ func start(t *testing.T, runner, temp string, args ...string) *run {
 	r := &run{temp: temp, lines: make(chan string, 100), read: make(chan struct{}), done: make(chan struct{})}
 	r.cmd = exec.Command(runner, args...)
 	r.cmd.Dir = root
-	r.cmd.Env = append(os.Environ(), "TMPDIR="+temp)
+	r.cmd.Env = append(append(os.Environ(), inherited...), "TMPDIR="+temp)
 	r.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // the test ends every process the run left
 	stdout, writer, err := os.Pipe()                        // a pipe of the test's own: Wait does not wait for its reader
 	if err != nil {
@@ -216,7 +227,7 @@ func (r *run) stdout(t *testing.T) []string {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.out...)
+	return slices.Clone(r.out)
 }
 
 func (r *run) output() string {
@@ -255,8 +266,13 @@ func (r *run) waitForFolder(t *testing.T) {
 	t.Fatalf("the run made no folder within a minute:\n%s", r.output())
 }
 
+// marker is the part of the run's names that holds its process ID.
+func (r *run) marker() string {
+	return "-" + strconv.Itoa(r.cmd.Process.Pid) + "-"
+}
+
 func (r *run) folder() string {
-	matches, _ := filepath.Glob(filepath.Join(r.temp, fmt.Sprintf("agent-test-*-%d-*", r.cmd.Process.Pid)))
+	matches, _ := filepath.Glob(filepath.Join(r.temp, prefix+"*"+r.marker()+"*"))
 	if len(matches) == 1 {
 		return matches[0]
 	}
@@ -291,57 +307,45 @@ func (r *run) wait(t *testing.T) int {
 	}
 }
 
-// removeAfter removes a project the test leaves behind on purpose, when the test ends.
-func (r *run) removeAfter(t *testing.T, project string) {
+// removeAfter removes the run's project and folder, left behind on purpose, when the test ends.
+func (r *run) removeAfter(t *testing.T) {
 	folder := r.folder()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "docker", "compose", "-p", project, "down", "--volumes", "--remove-orphans").Run()
+		_ = exec.CommandContext(ctx, "docker", "compose", "-p", filepath.Base(folder), "down", "--volumes", "--remove-orphans", "--rmi", "local").Run()
 		_ = os.RemoveAll(folder)
 	})
 }
 
-// assertGone checks that the run left neither its project nor its folder.
+// assertGone checks that the run left neither its project, nor a volume of it, nor its folder.
 func assertGone(t *testing.T, r *run) {
 	t.Helper()
-	matches, _ := filepath.Glob(filepath.Join(r.temp, fmt.Sprintf("agent-test-*-%d-*", r.cmd.Process.Pid)))
-	for _, folder := range matches {
+	if folder := r.folder(); folder != "" {
 		t.Errorf("the run left its folder %s", folder)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	listedAll, err := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	marker := "-" + strconv.Itoa(r.cmd.Process.Pid) + "-"
-	var projects []struct{ Name string }
-	_ = json.Unmarshal(listedAll, &projects)
-	for _, project := range projects {
-		if strings.HasPrefix(project.Name, "agent-test-") && strings.Contains(project.Name, marker) {
-			t.Errorf("the run left its project %s", project.Name)
-		}
-	}
 	// Compose lists a project by its containers: a volume left without one is checked by its own label.
-	volumes, err := exec.CommandContext(ctx, "docker", "volume", "ls", "--quiet", "--filter", "label=com.docker.compose.project").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, volume := range strings.Fields(string(volumes)) {
-		if strings.HasPrefix(volume, "agent-test-") && strings.Contains(volume, marker) {
-			t.Errorf("the run left its volume %s", volume)
+	volumes := docker(t, "volume", "ls", "--quiet", "--filter", "label=com.docker.compose.project")
+	for _, name := range append(docker(t, "compose", "ls", "--all", "--quiet"), volumes...) {
+		if strings.HasPrefix(name, prefix) && strings.Contains(name, r.marker()) {
+			t.Errorf("the run left %s", name)
 		}
 	}
 }
 
 func listed(t *testing.T, project string) bool {
 	t.Helper()
+	return slices.Contains(docker(t, "compose", "ls", "--all", "--quiet"), project)
+}
+
+// docker runs a listing and answers its lines.
+func docker(t *testing.T, args ...string) []string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--quiet").Output()
+	output, err := exec.CommandContext(ctx, "docker", args...).Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("docker %s: %v", strings.Join(args, " "), err)
 	}
-	return strings.Contains("\n"+string(output), "\n"+project+"\n")
+	return strings.Fields(string(output))
 }

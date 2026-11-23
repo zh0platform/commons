@@ -24,7 +24,6 @@ func TestCheckNamesTheFieldThatCannotBuildAStack(t *testing.T) {
 		"Schema":      func(p *Product) { p.Schema = "shop; DROP" },
 	} {
 		broken := valid
-		broken.Logins = append([]string(nil), valid.Logins...)
 		change(&broken)
 		if err := broken.Check(); err == nil || !strings.HasPrefix(err.Error(), "field "+field) {
 			t.Errorf("Check(product with a bad %s) = %v, want an error naming %s", field, err, field)

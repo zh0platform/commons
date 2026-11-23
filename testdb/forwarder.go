@@ -28,7 +28,8 @@ type Forwarder struct {
 	commits    atomic.Int32
 	wg         sync.WaitGroup
 	mu         sync.Mutex
-	open       map[net.Conn]struct{} // accepted connections, closed by the test's cleanup
+	open       map[net.Conn]struct{} // accepted client connections, closed by the test's cleanup
+	closed     bool                  // the test's cleanup began: a connection accepted now is closed at once
 }
 
 // NewForwarder listens until the test ends, when it closes every connection it accepted and waits for its relays to
@@ -44,6 +45,7 @@ func NewForwarder(t testing.TB, db *Database) *Forwarder {
 	t.Cleanup(func() {
 		_ = listener.Close()
 		f.mu.Lock()
+		f.closed = true
 		for conn := range f.open {
 			_ = conn.Close()
 		}
@@ -84,33 +86,30 @@ func (f *Forwarder) accept() {
 		if err != nil {
 			return
 		}
-		f.track(client, true)
-		f.wg.Go(func() { f.relay(client) })
-	}
-}
-
-// track adds a connection to those the test's cleanup closes, or removes it once its relay closed it.
-func (f *Forwarder) track(conn net.Conn, open bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if open {
-		f.open[conn] = struct{}{}
-	} else {
-		delete(f.open, conn)
+		f.mu.Lock()
+		if f.closed {
+			_ = client.Close()
+		} else {
+			f.open[client] = struct{}{}
+			f.wg.Go(func() { f.relay(client) })
+		}
+		f.mu.Unlock()
 	}
 }
 
 // relay copies one client's connection both ways; when either direction ends, for any reason, it closes both sockets
 // so the other direction ends too.
 func (f *Forwarder) relay(client net.Conn) {
-	defer f.track(client, false)
-	defer func() { _ = client.Close() }()
+	defer func() {
+		_ = client.Close()
+		f.mu.Lock()
+		delete(f.open, client)
+		f.mu.Unlock()
+	}()
 	server, err := net.Dial("tcp", net.JoinHostPort(f.db.server.Host, f.db.server.Port))
 	if err != nil {
 		return
 	}
-	f.track(server, true)
-	defer f.track(server, false)
 	closeBoth := func() {
 		_ = client.Close()
 		_ = server.Close()

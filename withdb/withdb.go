@@ -84,15 +84,17 @@ type Stack struct {
 	base       []string // the inherited environment every process the runner starts gets
 	composeEnv []string // the run's values for Compose and the product's files
 	commandEnv []string // the run's values for the command
-	server     testdb.Server
 
 	signals chan os.Signal
+	stop    context.Context    // ended by a signal that came before the command
+	stopNow context.CancelFunc // ends stop, and with it the Compose call in progress
 	mu      sync.Mutex
-	command *os.Process        // the running command, which receives every signal
-	cancel  context.CancelFunc // ends the Compose call in progress during Start
-	stopped bool               // a signal arrived before the command started
-	passed  bool               // the command ended with status 0
+	command *os.Process // the running command, which receives every signal
+	passed  bool        // the command ended with status 0
 }
+
+// errStopped answers a run that a signal stopped before its command.
+var errStopped = errors.New("stopped during setup")
 
 // Start checks the product's description, reports what killed runs of the product left, and brings up the run's
 // stack: its folder, authority, server certificate and passwords, the Compose files, the services, healthy, and the
@@ -106,6 +108,7 @@ func Start(p testdb.Product) (*Stack, error) {
 	s := &Stack{product: p, name: owner(p) + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(rand.Text()[:8])}
 	s.folder = filepath.Join(os.TempDir(), s.name)
 	s.base = inherited(p)
+	s.stop, s.stopNow = context.WithCancel(context.Background())
 	s.signals = make(chan os.Signal, 1)
 	signal.Notify(s.signals, os.Interrupt, syscall.SIGTERM)
 	go s.watch()
@@ -124,18 +127,12 @@ func (s *Stack) start() error {
 	if err := os.Mkdir(s.folder, 0o700); err != nil {
 		return fmt.Errorf("setup failed: %w", err)
 	}
-	if err := s.writeFiles(); err != nil {
+	server, err := s.writeFiles()
+	if err != nil {
 		return fmt.Errorf("setup failed: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), startBound)
+	ctx, cancel := context.WithTimeout(s.stop, startBound)
 	defer cancel()
-	s.mu.Lock()
-	s.cancel = cancel
-	stopped := s.stopped
-	s.mu.Unlock()
-	if stopped {
-		return errors.New("stopped during setup")
-	}
 	up := []string{}
 	for _, file := range s.files {
 		up = append(up, "--file", file)
@@ -148,7 +145,6 @@ func (s *Stack) start() error {
 	if err != nil {
 		return s.setupError("reading a port", ctx, err)
 	}
-	server := s.server
 	server.Host, server.Port = host, port
 	provisionCtx, cancelProvision := context.WithTimeout(ctx, provisionBound)
 	defer cancelProvision()
@@ -170,23 +166,17 @@ func (s *Stack) start() error {
 		s.commandEnv = append(s.commandEnv,
 			"COMPOSE_PROJECT_NAME="+s.name, "COMPOSE_FILE="+strings.Join(s.files, string(os.PathListSeparator)))
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cancel = nil
-	if s.stopped {
-		return errors.New("stopped during setup")
+	if s.stop.Err() != nil {
+		return errStopped
 	}
 	return nil
 }
 
 // setupError names the failed step, or the signal or bound that ended it.
 func (s *Stack) setupError(step string, ctx context.Context, err error) error {
-	s.mu.Lock()
-	stopped := s.stopped
-	s.mu.Unlock()
 	switch {
-	case stopped:
-		return errors.New("stopped during setup")
+	case s.stop.Err() != nil:
+		return errStopped
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fmt.Errorf("setup failed: %s: no answer within %v: %w", step, startBound, err)
 	}
@@ -194,42 +184,42 @@ func (s *Stack) setupError(step string, ctx context.Context, err error) error {
 }
 
 // writeFiles makes the run's secrets and writes the module's Compose files, with the product's prefix, into the run's
-// folder. The secrets reach Compose only through its environment, never a file.
-func (s *Stack) writeFiles() error {
+// folder. The secrets reach Compose only through its environment, never a file. It answers the server's authority and
+// passwords; its address comes once it runs.
+func (s *Stack) writeFiles() (testdb.Server, error) {
 	p := s.product
 	authority, err := testdb.NewAuthority()
 	if err != nil {
-		return err
+		return testdb.Server{}, err
 	}
-	certPEM, keyPEM, err := authority.ServerCertificate(p.Names...)
+	certPEM, keyPEM, err := authority.ServerCertificate(append([]string{postgresService, keycloakAlias}, p.Names...)...)
 	if err != nil {
-		return err
+		return testdb.Server{}, err
 	}
 	pin, err := publicKeyPin(certPEM)
 	if err != nil {
-		return err
+		return testdb.Server{}, err
 	}
-	s.server = testdb.Server{CA: authority.PEM(), AdminPassword: rand.Text(), LoginPassword: rand.Text()}
-	values := map[string]string{
-		"ADMIN_PASSWORD": s.server.AdminPassword, "SERVER_CERT": certPEM, "SERVER_KEY": keyPEM,
-		"SERVER_SPKI": pin, "PG_HBA": hba(p), "ROOT": p.Root,
-	}
-	for _, name := range composeSuffixes {
-		s.composeEnv = append(s.composeEnv, p.Variables+name+"="+values[name])
+	server := testdb.Server{CA: authority.PEM(), AdminPassword: rand.Text(), LoginPassword: rand.Text()}
+	for _, value := range []struct{ suffix, value string }{
+		{adminPassword, server.AdminPassword}, {serverCert, certPEM}, {serverKey, keyPEM},
+		{serverPin, pin}, {pgHBA, hba(p)}, {root, p.Root},
+	} {
+		s.composeEnv = append(s.composeEnv, p.Variables+value.suffix+"="+value.value)
 	}
 	names := []string{"postgres.yaml"}
 	if p.Realms != "" {
 		names = append(names, "keycloak.yaml")
-		s.composeEnv = append(s.composeEnv, "KEYCLOAK_REALMS="+p.Realms)
+		s.composeEnv = append(s.composeEnv, realmsVariable+"="+p.Realms)
 	}
 	for _, name := range names {
 		content, err := embedded.ReadFile(name)
 		if err != nil {
-			return err
+			return testdb.Server{}, err
 		}
 		path := filepath.Join(s.folder, name)
 		if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(content), placeholder, p.Variables)), 0o600); err != nil {
-			return err
+			return testdb.Server{}, err
 		}
 		s.files = append(s.files, path)
 	}
@@ -239,16 +229,26 @@ func (s *Stack) writeFiles() error {
 		}
 		s.files = append(s.files, file)
 	}
-	return nil
+	return server, nil
 }
 
-// composeSuffixes are the variables, after the product's prefix, that Compose and the product's files read.
-var composeSuffixes = []string{"ADMIN_PASSWORD", "SERVER_CERT", "SERVER_KEY", "SERVER_SPKI", "PG_HBA", "ROOT"}
+// The variables, after the product's prefix, that Compose and the product's files read; and the realm folder's.
+const (
+	adminPassword  = "ADMIN_PASSWORD"
+	serverCert     = "SERVER_CERT"
+	serverKey      = "SERVER_KEY"
+	serverPin      = "SERVER_SPKI"
+	pgHBA          = "PG_HBA"
+	root           = "ROOT"
+	realmsVariable = "KEYCLOAK_REALMS"
+	// keycloakAlias is Keycloak's name on the stack's network (keycloak.yaml), on the server certificate.
+	keycloakAlias = "idp.test"
+)
 
 // hba allows TLS for every login, and plaintext only for the product's logins on the lost-commit tests' databases,
 // which the relay reaches on loopback. The image's own health check uses the server's socket.
 func hba(p testdb.Product) string {
-	return "local all postgres trust\n" +
+	return "local all " + testdb.Administrator + " trust\n" +
 		"hostssl all all 0.0.0.0/0 scram-sha-256\n" +
 		"hostssl all all ::/0 scram-sha-256\n" +
 		`hostnossl "/^` + testdb.PlaintextPrefix + `" ` + strings.Join(p.Logins, ",") + " 0.0.0.0/0 scram-sha-256\n"
@@ -271,7 +271,7 @@ func publicKeyPin(certPEM string) (string, error) {
 
 // Published is the loopback host and port Docker chose for a service's container port.
 func (s *Stack) Published(service, port string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), callBound)
+	ctx, cancel := context.WithTimeout(s.stop, callBound)
 	defer cancel()
 	answer, err := s.compose(ctx, "port", service, port)
 	if err != nil {
@@ -293,9 +293,9 @@ func (s *Stack) Run(command []string, variables ...string) (int, error) {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = slices.Concat(s.base, variables, s.commandEnv)
 	s.mu.Lock()
-	if s.stopped {
+	if s.stop.Err() != nil {
 		s.mu.Unlock()
-		return 1, errors.New("stopped during setup")
+		return 1, errStopped
 	}
 	if err := cmd.Start(); err != nil {
 		s.mu.Unlock()
@@ -337,7 +337,7 @@ func (s *Stack) remove(withLogs bool) error {
 		_, _ = os.Stderr.Write(logs)
 	}
 	// The folder goes only once the project is gone: it is what the next start finds a leftover by.
-	if _, err := s.compose(ctx, "down", "--volumes", "--remove-orphans", "--rmi", "local"); err != nil {
+	if _, err := s.compose(ctx, downArgs...); err != nil {
 		return fmt.Errorf("removing %s failed: %w; remove it with: %s", s.name, err, removal(s.name, s.folder))
 	}
 	if err := os.RemoveAll(s.folder); err != nil {
@@ -351,9 +351,13 @@ func removal(name, folder string) string {
 	return projectRemoval(name) + " && rm -rf " + quoted(folder)
 }
 
+// projectRemoval is the command that removes a run's project by its name.
 func projectRemoval(name string) string {
-	return "docker compose -p " + name + " down --volumes --remove-orphans --rmi local"
+	return "docker compose -p " + name + " " + strings.Join(downArgs, " ")
 }
+
+// downArgs remove a project with its volumes, orphans and the images Compose built for it.
+var downArgs = []string{"down", "--volumes", "--remove-orphans", "--rmi", "local"}
 
 // quoted is a path as one shell word.
 func quoted(path string) string {
@@ -372,14 +376,10 @@ func (s *Stack) compose(ctx context.Context, args ...string) ([]byte, error) {
 func (s *Stack) watch() {
 	for received := range s.signals {
 		s.mu.Lock()
-		switch {
-		case s.command != nil:
+		if s.command != nil {
 			_ = s.command.Signal(received)
-		default:
-			s.stopped = true
-			if s.cancel != nil {
-				s.cancel()
-			}
+		} else {
+			s.stopNow()
 		}
 		s.mu.Unlock()
 	}
@@ -388,16 +388,15 @@ func (s *Stack) watch() {
 func (s *Stack) stopSignals() {
 	signal.Stop(s.signals)
 	close(s.signals)
+	s.stopNow()
 }
 
 // inherited is the runner's environment without the variables the product refuses, without Compose's own and
 // without every name the runner sets, so a shell that ran or exported another run's settings cannot point this run
 // at that run's servers.
 func inherited(p testdb.Product) []string {
-	runnerNames := slices.Concat(p.ServerVariables(), []string{
-		keycloak.URLVariable, keycloak.CAVariable, "KEYCLOAK_REALMS",
-	})
-	for _, suffix := range composeSuffixes {
+	runnerNames := slices.Concat(p.ServerVariables(), []string{keycloak.URLVariable, keycloak.CAVariable, realmsVariable})
+	for _, suffix := range []string{adminPassword, serverCert, serverKey, serverPin, pgHBA, root} {
 		runnerNames = append(runnerNames, p.Variables+suffix)
 	}
 	var kept []string
@@ -428,34 +427,40 @@ func owner(p testdb.Product) string {
 // Docker objects made before a run's first container are not listed by Compose.
 func reportLeftovers(p testdb.Product) {
 	prefix := owner(p)
-	dead := map[string]bool{} // name -> whether Compose lists a project of that name
+	projects, folders := map[string]bool{}, map[string]bool{}
 	ctx, cancel := context.WithTimeout(context.Background(), callBound)
 	defer cancel()
 	if listed, err := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json").Output(); err == nil {
-		var projects []struct{ Name string }
-		_ = json.Unmarshal(listed, &projects)
-		for _, project := range projects {
-			if isLeftover(prefix, project.Name) {
-				dead[project.Name] = true
-			}
+		var found []struct{ Name string }
+		_ = json.Unmarshal(listed, &found)
+		for _, project := range found {
+			projects[project.Name] = isLeftover(prefix, project.Name)
 		}
 	}
 	if entries, err := os.ReadDir(os.TempDir()); err == nil {
 		for _, entry := range entries {
-			if _, listed := dead[entry.Name()]; !listed && entry.IsDir() && isLeftover(prefix, entry.Name()) {
-				dead[entry.Name()] = false
-			}
+			folders[entry.Name()] = entry.IsDir() && isLeftover(prefix, entry.Name())
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(dead)) {
+	names := map[string]bool{}
+	maps.Copy(names, projects)
+	maps.Copy(names, folders)
+	for _, name := range slices.Sorted(maps.Keys(names)) {
 		folder := filepath.Join(os.TempDir(), name)
-		switch _, err := os.Stat(folder); {
-		case !dead[name]:
-			_, _ = fmt.Fprintf(os.Stderr, "withdb: the folder %s is left from a run that ended without its cleanup; remove it with: rm -rf %s\n", folder, quoted(folder))
-		case err == nil:
-			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: %s\n", name, removal(name, folder))
-		default:
-			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: %s\n", name, projectRemoval(name))
+		var subject string
+		var commands []string
+		if projects[name] {
+			subject, commands = name, append(commands, projectRemoval(name))
+		}
+		if folders[name] {
+			commands = append(commands, "rm -rf "+quoted(folder))
+			if subject == "" {
+				subject = "the folder " + folder
+			}
+		}
+		if subject != "" {
+			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: %s\n",
+				subject, strings.Join(commands, " && "))
 		}
 	}
 }
