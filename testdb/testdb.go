@@ -29,6 +29,8 @@ type Product struct {
 	Project   string   // start of every Compose project and run-folder name, such as "shop-test-"
 	Variables string   // start of every variable the runner sets but the Keycloak and Compose names, such as "SHOP_TEST_"
 	Logins    []string // the server's logins, all with the run's login password
+	// PlaintextLogins are the logins the server admits without TLS on the PlaintextPrefix databases; empty: all Logins.
+	PlaintextLogins []string
 	// Statements run as the administrator after the logins exist: an attribute by ALTER ROLE, a role without login, a
 	// grant. They never carry the password.
 	Statements  []string
@@ -61,6 +63,8 @@ func (p Product) Check() error {
 		return errors.New("field Logins: at least one login")
 	case !slices.Contains(p.Logins, p.SchemaOwner):
 		return fmt.Errorf("field SchemaOwner %q: one of Logins", p.SchemaOwner)
+	case slices.ContainsFunc(p.PlaintextLogins, func(login string) bool { return !slices.Contains(p.Logins, login) }):
+		return fmt.Errorf("field PlaintextLogins %v: each one of Logins", p.PlaintextLogins)
 	case slices.ContainsFunc(p.Names, isLocalhost):
 		return errors.New(`field Names: "localhost" stays off the certificate, so dialling it is the wrong-name case`)
 	case !filepath.IsAbs(p.Root):
@@ -85,8 +89,8 @@ func isLocalhost(name string) bool {
 	return strings.EqualFold(strings.TrimSuffix(name, "."), "localhost")
 }
 
-// PlaintextPrefix starts the names of the databases on which the server accepts the product's logins without TLS
-// (the lost-commit tests' relay).
+// PlaintextPrefix starts the names of the databases on which the server accepts the product's plaintext logins
+// without TLS (the lost-commit tests' relay).
 const PlaintextPrefix = "lostcommit_"
 
 // Administrator is the server's superuser, the image's own.

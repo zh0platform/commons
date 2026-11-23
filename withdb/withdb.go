@@ -257,13 +257,18 @@ const (
 	keycloakAlias = "idp.test"
 )
 
-// hba allows TLS for every login, and plaintext only for the product's logins on the lost-commit tests' databases,
-// which the relay reaches on loopback. The image's own health check uses the server's socket.
+// hba allows TLS for every login, and plaintext only for the product's plaintext logins (all its logins when it lists
+// none) on the lost-commit tests' databases, which the relay reaches on loopback. The image's own health check uses
+// the server's socket.
 func hba(p testdb.Product) string {
+	plaintext := p.PlaintextLogins
+	if len(plaintext) == 0 {
+		plaintext = p.Logins
+	}
 	return "local all " + testdb.Administrator + " trust\n" +
 		"hostssl all all 0.0.0.0/0 scram-sha-256\n" +
 		"hostssl all all ::/0 scram-sha-256\n" +
-		`hostnossl "/^` + testdb.PlaintextPrefix + `" ` + strings.Join(p.Logins, ",") + " 0.0.0.0/0 scram-sha-256\n"
+		`hostnossl "/^` + testdb.PlaintextPrefix + `" ` + strings.Join(plaintext, ",") + " 0.0.0.0/0 scram-sha-256\n"
 }
 
 // publicKeyPin is the base64 SHA-256 of a PEM certificate's public key, the form Chromium's

@@ -6,7 +6,24 @@ import (
 	"testing"
 
 	"git.kloudbox.de/commons/commons/internal/selftest"
+	"git.kloudbox.de/commons/commons/testdb"
 )
+
+// Without TLS the server admits only the listed logins, or every product login by name when none are listed, and only
+// on the plaintext-prefix databases.
+func TestPlaintextRuleNamesItsLogins(t *testing.T) {
+	product := selftest.Product(t.TempDir())
+	for _, c := range []struct{ listed, admitted []string }{
+		{nil, product.Logins},
+		{[]string{selftest.RuntimeLogin}, []string{selftest.RuntimeLogin}},
+	} {
+		product.PlaintextLogins = c.listed
+		want := `hostnossl "/^` + testdb.PlaintextPrefix + `" ` + strings.Join(c.admitted, ",") + " 0.0.0.0/0 scram-sha-256"
+		if rules := hba(product); !slices.Contains(strings.Split(rules, "\n"), want) || strings.Count(rules, "hostnossl") != 1 {
+			t.Errorf("hba(PlaintextLogins %v) = %q, want the one plaintext rule %q", c.listed, rules, want)
+		}
+	}
+}
 
 // A shell that ran another run of the product, or exported its settings or Compose's own, must not point this run's
 // processes at that run's servers or change which services Compose starts; a setting the runner does not manage

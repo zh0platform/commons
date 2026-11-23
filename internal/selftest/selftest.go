@@ -27,6 +27,8 @@ func Product(root string) testdb.Product {
 		Project:   "agent-test-",
 		Variables: "AGENTTEST_",
 		Logins:    []string{MigrateLogin, RuntimeLogin, LifecycleLogin, RecoveryLogin},
+		// The login that bypasses row security connects only with TLS.
+		PlaintextLogins: []string{MigrateLogin, RuntimeLogin, LifecycleLogin},
 		Statements: []string{
 			"ALTER ROLE " + RecoveryLogin + " BYPASSRLS",
 			"CREATE ROLE " + SchedulerRole + " NOLOGIN",

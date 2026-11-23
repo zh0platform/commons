@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"git.kloudbox.de/commons/commons/internal/selftest"
 	"git.kloudbox.de/commons/commons/testdb"
@@ -127,6 +128,45 @@ func TestRelayClosesAConnectionWhoseMessageExceedsTheCap(t *testing.T) {
 	if err := conn.Ping(ctx); err != nil {
 		t.Errorf("a query through the relay: %v", err)
 	}
+}
+
+// Over TCP without TLS the server admits the product's plaintext logins on a plaintext-prefix database and nothing
+// else; the login it refuses there still connects with TLS.
+func TestPlaintextAdmitsOnlyTheListedLogins(t *testing.T) {
+	plaintext := testdb.NewPlaintext(t, product(t))
+	ordinary := testdb.New(t, product(t))
+	for _, c := range []struct {
+		database *testdb.Database
+		login    string
+		admitted bool
+	}{
+		{plaintext, selftest.RuntimeLogin, true},
+		{plaintext, selftest.RecoveryLogin, false},
+		{ordinary, selftest.RuntimeLogin, false},
+	} {
+		err := connectWithoutTLS(c.database.Settings(c.login))
+		var refused *pgconn.PgError
+		if c.admitted && err != nil || !c.admitted && !(errors.As(err, &refused) && refused.Code == "28000") {
+			t.Errorf("connect %s to %s without TLS = %v, want admitted %v (a refusal is SQLSTATE 28000)", c.login, c.database.Name, err, c.admitted)
+		}
+	}
+	plaintext.Connect(t, selftest.RecoveryLogin, plaintext.LoginsPassword())
+}
+
+func connectWithoutTLS(settings testdb.Settings) error {
+	config, err := pgx.ParseConfig(fmt.Sprintf("host=%s port=%d dbname=%s user=%s sslmode=disable",
+		settings.Host, settings.Port, settings.Database, settings.Login))
+	if err != nil {
+		return err
+	}
+	config.Password = settings.Password
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		return err
+	}
+	return conn.Close(ctx)
 }
 
 func dial(t *testing.T, relay *testdb.Forwarder) net.Conn {
