@@ -149,7 +149,8 @@ func TestPlaintextAdmitsOnlyTheListedLogins(t *testing.T) {
 }
 
 // An arm that skips one completion lets the first tagged statement through, whichever connection completes it, and
-// withholds the second one's answer, on another connection, after its work commits.
+// withholds the second one's answer, on another connection, after its work commits; a completion of another tag
+// counts for nothing.
 func TestRelayDropsTheAnswerAfterTheSkippedCompletions(t *testing.T) {
 	database := testdb.NewPlaintext(t, product(t))
 	ctx := context.Background()
@@ -168,6 +169,9 @@ func TestRelayDropsTheAnswerAfterTheSkippedCompletions(t *testing.T) {
 	}
 	defer func() { _ = second.Close(ctx) }()
 	relay.DropAnswerAfter("INSERT", 1)
+	if _, err := first.Exec(ctx, "SELECT 1"); err != nil {
+		t.Fatalf("a completion of another tag: %v, want answered", err)
+	}
 	if _, err := first.Exec(ctx, "INSERT INTO public.relayed VALUES (1)"); err != nil {
 		t.Fatalf("the skipped completion: %v, want answered", err)
 	}
