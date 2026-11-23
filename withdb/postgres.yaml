@@ -1,31 +1,32 @@
-# The test database: one PostgreSQL 18 server, the image infra runs, started as a Compose project of its own by
-# `go run ./test/withdb`. TLS files and pg_hba arrive in variables set by the wrapper for this run only.
+# The test database: one PostgreSQL 18 server, the image infra runs, started as a Compose project of its own by a
+# withdb runner. TLS files and pg_hba arrive in variables set by the runner for this run only. WITHDB_ is replaced by
+# the product's variable prefix when the runner writes this file.
 services:
   postgres:
     image: postgres:18.7-trixie@sha256:e754b839f447639b7004895f4d8a4bfcb4e9dbe3a1bc035f27f646562a16fd61
     environment:
-      POSTGRES_PASSWORD: ${BFF_TEST_ADMIN_PASSWORD:?}
-      BFF_TEST_SERVER_CERT: ${BFF_TEST_SERVER_CERT:?}
-      BFF_TEST_SERVER_KEY: ${BFF_TEST_SERVER_KEY:?}
-      BFF_TEST_PG_HBA: ${BFF_TEST_PG_HBA:?}
+      POSTGRES_PASSWORD: ${WITHDB_ADMIN_PASSWORD:?}
+      WITHDB_SERVER_CERT: ${WITHDB_SERVER_CERT:?}
+      WITHDB_SERVER_KEY: ${WITHDB_SERVER_KEY:?}
+      WITHDB_PG_HBA: ${WITHDB_PG_HBA:?}
       # Server settings a stack of its own replaces; the last -c of a name wins (make capacity: production durability).
       # Each login's arrival and setup durations go to the log, which withdb prints when a run fails: a login that
       # arrived but never became ready shows as a "connection received" line without its "connection ready".
-      BFF_TEST_PG_FLAGS: -c log_connections=receipt,setup_durations
+      WITHDB_PG_FLAGS: -c log_connections=receipt,setup_durations
     # Writes the TLS files and pg_hba readable by the server only, then starts the image's entry point.
     entrypoint:
       - sh
       - -ec
       - |
-        install -d -o postgres -g postgres -m 700 /etc/bff-test
-        printf '%s' "$$BFF_TEST_SERVER_CERT" > /etc/bff-test/server.crt
-        printf '%s' "$$BFF_TEST_SERVER_KEY" > /etc/bff-test/server.key
-        printf '%s' "$$BFF_TEST_PG_HBA" > /etc/bff-test/pg_hba.conf
-        chown postgres:postgres /etc/bff-test/*
-        chmod 600 /etc/bff-test/*
-        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/etc/bff-test/server.crt \
-          -c ssl_key_file=/etc/bff-test/server.key -c hba_file=/etc/bff-test/pg_hba.conf \
-          -c max_connections=300 -c fsync=off -c synchronous_commit=off -c full_page_writes=off $$BFF_TEST_PG_FLAGS
+        install -d -o postgres -g postgres -m 700 /etc/withdb
+        printf '%s' "$$WITHDB_SERVER_CERT" > /etc/withdb/server.crt
+        printf '%s' "$$WITHDB_SERVER_KEY" > /etc/withdb/server.key
+        printf '%s' "$$WITHDB_PG_HBA" > /etc/withdb/pg_hba.conf
+        chown postgres:postgres /etc/withdb/*
+        chmod 600 /etc/withdb/*
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/etc/withdb/server.crt \
+          -c ssl_key_file=/etc/withdb/server.key -c hba_file=/etc/withdb/pg_hba.conf \
+          -c max_connections=300 -c fsync=off -c synchronous_commit=off -c full_page_writes=off $$WITHDB_PG_FLAGS
     ports:
       - "127.0.0.1::5432"
     volumes:

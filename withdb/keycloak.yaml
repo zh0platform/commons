@@ -1,5 +1,5 @@
 # A Keycloak for tests, generic: it names nothing of the project using it. It serves HTTPS only with the certificate
-# and key in BFF_TEST_SERVER_CERT and BFF_TEST_SERVER_KEY, imports every realm file of the folder KEYCLOAK_REALMS (an
+# and key in WITHDB_SERVER_CERT and WITHDB_SERVER_KEY, imports every realm file of the folder KEYCLOAK_REALMS (an
 # absolute path: with several Compose files a relative one would follow the first file) at start and reads the
 # password deny lists a realm's policy names from the same folder, takes its hostname from each request (development
 # mode), and is ready when its health endpoint says so. Its bootstrap administrator (test-only credentials) drives the
@@ -10,8 +10,8 @@ services:
     # Docker Hub, not quay.io: only Docker Hub gives Renovate the release dates its 7-day wait needs.
     image: keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
     environment:
-      BFF_TEST_SERVER_CERT: ${BFF_TEST_SERVER_CERT:?}
-      BFF_TEST_SERVER_KEY: ${BFF_TEST_SERVER_KEY:?}
+      WITHDB_SERVER_CERT: ${WITHDB_SERVER_CERT:?}
+      WITHDB_SERVER_KEY: ${WITHDB_SERVER_KEY:?}
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_MANAGEMENT_SCHEME: http # the health check inside the container speaks plain HTTP
       JAVA_OPTS_KC_HEAP: -Xms256m -Xmx512m
@@ -24,8 +24,8 @@ services:
       - bash
       - -ec
       - |
-        printf '%s' "$$BFF_TEST_SERVER_CERT" > /tmp/server.crt
-        printf '%s' "$$BFF_TEST_SERVER_KEY" > /tmp/server.key
+        printf '%s' "$$WITHDB_SERVER_CERT" > /tmp/server.crt
+        printf '%s' "$$WITHDB_SERVER_KEY" > /tmp/server.key
         exec /opt/keycloak/bin/kc.sh start-dev --import-realm --http-enabled=false --https-port=8443 \
           --https-certificate-file=/tmp/server.crt --https-certificate-key-file=/tmp/server.key \
           --spi-password-policy--password-blacklist--blacklists-path=/opt/keycloak/data/import

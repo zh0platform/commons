@@ -1,0 +1,55 @@
+version: "2"
+
+run:
+  build-tags:
+    - database
+    - stack
+    - keycloak
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - forbidigo
+    - gochecknoinits
+    - gosec
+    - govet
+    - nolintlint
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    errcheck:
+      check-type-assertions: true
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^testing\.(T|B|F)\.Skip(f|Now)?$
+          msg: a test never skips; missing infrastructure is a setup failure to report
+        - pattern: ^time\.Sleep$
+          msg: wait on a condition with a deadline
+        - pattern: ^fmt\.Print(f|ln)?$
+        - pattern: ^print(ln)?$
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: exported
+  exclusions:
+    rules:
+      # The runner's purpose is to run the product's command and Compose; its tests run the runner.
+      - linters:
+          - gosec
+        path: (^withdb/|_test\.go$)
+        text: G204
+      # A realm file and the module's own files are read from paths the test or the product names.
+      - linters:
+          - gosec
+        path: (^keycloak/keycloak\.go$|_test\.go$)
+        text: G304
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

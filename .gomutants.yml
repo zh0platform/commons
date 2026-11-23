@@ -1,0 +1,12 @@
+# Mutation testing on the change, not the repository (workspace testing policy, "Testing techniques of a project"):
+# only the lines a change touched, only operators that test logic, only the tests that cover each line in its own
+# package. Run: go run github.com/gomutants/gomutants@v0.7.3 --workers <cores> ./...
+changed-since: "origin/main"
+integration: false
+only:
+  - CONDITIONALS_BOUNDARY
+  - CONDITIONALS_NEGATION
+  - INVERT_LOGICAL
+  - REMOVE_LOGICAL_NOT
+  - ARITHMETIC_BASE
+  - RETURN_ERROR_NIL

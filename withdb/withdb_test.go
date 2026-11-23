@@ -1,55 +1,32 @@
-package main
+package withdb
 
 import (
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
-	"git.kloudbox.de/commons/bff/test/browser"
-	"git.kloudbox.de/commons/bff/test/keycloak"
-	"git.kloudbox.de/commons/bff/test/testdb"
+	"git.kloudbox.de/commons/commons/internal/selftest"
 )
 
-// A shell that ran another withdb, or exported its settings, must not point this run's command at that run's servers:
-// a run without Keycloak would otherwise reach another run's Keycloak instead of failing.
-func TestCommandEnvironGetsNoInheritedRunnerSettings(t *testing.T) {
-	for _, name := range []string{keycloak.URLVariable, testdb.HostVariable, browser.DevToolsVariable, "PGHOST"} {
+// A shell that ran another run of the product, or exported its settings or Compose's own, must not point this run's
+// processes at that run's servers or change which services Compose starts; a setting the runner does not manage
+// passes through.
+func TestInheritedDropsRunnerSettingsComposeAndRefusedVariables(t *testing.T) {
+	product := selftest.Product(t.TempDir())
+	for _, name := range []string{
+		"AGENTTEST_DB_HOST", "AGENTTEST_SERVER_KEY", "AGENTTEST_ROOT", "KEYCLOAK_TEST_URL", "KEYCLOAK_REALMS",
+		"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "AGENT_TYPO",
+	} {
 		t.Setenv(name, "another-run")
 	}
-	t.Setenv("BFF_TEST_PG_FLAGS", "-c fsync=on") // a setting withdb does not manage
-	environment := commandEnviron()
+	t.Setenv("AGENTTEST_PG_FLAGS", "-c fsync=on")
+	environment := inherited(product)
 	for _, entry := range environment {
 		if strings.HasSuffix(entry, "=another-run") {
-			t.Errorf("the command inherits %s", entry)
+			t.Errorf("inherited(product) keeps %s", entry)
 		}
 	}
-	if !slices.Contains(environment, "BFF_TEST_PG_FLAGS=-c fsync=on") {
-		t.Error("the command lost an inherited setting withdb does not manage")
-	}
-}
-
-// A dropped --compose file would run the browser stack without its override (a checkout build where the published
-// image was meant): every flag counts, in any order.
-func TestParseArgsKeepsEveryFlagInAnyOrder(t *testing.T) {
-	for _, tc := range []struct {
-		args    []string
-		want    options
-		command []string
-	}{
-		{[]string{"--browser", "--quiet", "--compose", "a.yaml", "--compose", "b.yaml", "--", "go", "test"},
-			options{keycloak: true, browser: true, quiet: true, extras: []string{"a.yaml", "b.yaml"}}, []string{"go", "test"}},
-		{[]string{"--compose", "a.yaml", "--keycloak", "--", "run.sh"},
-			options{keycloak: true, extras: []string{"a.yaml"}}, []string{"run.sh"}},
-	} {
-		opts, command, err := parseArgs(tc.args)
-		if err != nil || !reflect.DeepEqual(opts, tc.want) || !slices.Equal(command, tc.command) {
-			t.Errorf("parseArgs(%q) = %+v, %q, %v; want %+v, %q", tc.args, opts, command, err, tc.want, tc.command)
-		}
-	}
-	for _, args := range [][]string{{"--browser"}, {"--compose"}, {"--quiet", "--"}, {"--unknown", "--", "x"}} {
-		if _, _, err := parseArgs(args); err == nil {
-			t.Errorf("parseArgs(%q) = no error, want the usage", args)
-		}
+	if !slices.Contains(environment, "AGENTTEST_PG_FLAGS=-c fsync=on") {
+		t.Error("inherited(product) lost AGENTTEST_PG_FLAGS, a setting the runner does not manage")
 	}
 }

@@ -1,0 +1,26 @@
+# plimsoll (https://github.com/julianzh0/plimsoll) reads this repository's own limits and architecture from here.
+# The tooling is this module's product: no test folders; its _test.go files are its tests.
+
+[limits]
+test_ratio = 2.0
+
+[defaults]
+base = "origin/main"
+
+# testdb and the two helper packages stand alone; the runner uses testdb and keycloak; the test product uses testdb,
+# and its runner program withdb.
+[imports]
+only = [
+  "withdb -> testdb",
+  "withdb -> keycloak",
+  "internal/selftest -> testdb",
+  "internal/selftest -> withdb",
+]
+never = [
+  "testdb -> withdb",
+  "keycloak -> testdb",
+  "totp -> testdb",
+]
+
+[tests]
+unit = ["**/*_test.go"]

@@ -5,16 +5,18 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"git.kloudbox.de/commons/bff/internal/db"
 )
 
-// Forwarder is a PostgreSQL protocol relay on 127.0.0.1 between bff and a plaintext test database. When armed with a
+// maxMessage bounds the length a protocol message may declare, so a peer on the loopback port cannot make the relay
+// allocate up to the protocol's 1 GiB. The largest message the lost-commit tests send is a migration of under 5 KiB
+// (measured 2026-11-23 on the products' migrations); 1 MiB leaves room for any test's statements and rows.
+const maxMessage = 1 << 20
+
+// Forwarder is a PostgreSQL protocol relay on 127.0.0.1 between a client and a plaintext test database. When armed with a
 // command tag, it withholds the answer to the next statement the server completes with that tag (an explicit COMMIT,
 // or a single statement whose implicit transaction commits at its Sync) until the server is ready for the next
 // query, then closes the client's connection: the work committed, and the client never hears so.
@@ -25,36 +27,38 @@ type Forwarder struct {
 	stallArmed atomic.Bool
 	commits    atomic.Int32
 	wg         sync.WaitGroup
+	mu         sync.Mutex
+	open       map[net.Conn]struct{} // accepted connections, closed by the test's cleanup
 }
 
-// NewForwarder listens until the test ends. The database must come from NewPlaintext.
+// NewForwarder listens until the test ends, when it closes every connection it accepted and waits for its relays to
+// end. The database must come from NewPlaintext.
 func NewForwarder(t testing.TB, db *Database) *Forwarder {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &Forwarder{db: db, listener: listener}
+	f := &Forwarder{db: db, listener: listener, open: map[net.Conn]struct{}{}}
 	f.wg.Go(f.accept)
 	t.Cleanup(func() {
 		_ = listener.Close()
+		f.mu.Lock()
+		for conn := range f.open {
+			_ = conn.Close()
+		}
+		f.mu.Unlock()
 		f.wg.Wait()
 	})
 	return f
 }
 
 // Settings connect a login through the forwarder in plaintext.
-func (f *Forwarder) Settings(login string) db.Config {
+func (f *Forwarder) Settings(login string) Settings {
 	settings := f.db.Settings(login)
 	addr, _ := f.listener.Addr().(*net.TCPAddr)
-	settings.Host, settings.Port, settings.TLSMode, settings.CA = "127.0.0.1", addr.Port, db.Disable, nil
+	settings.Host, settings.Port, settings.CA = "127.0.0.1", addr.Port, ""
 	return settings
-}
-
-// Environ is the bff environment that reaches this database through the forwarder.
-func (f *Forwarder) Environ() []string {
-	s := f.Settings(RuntimeLogin)
-	return environOf(s.Host, s.Port, s.Name, "", s.Password)
 }
 
 // DropNextAnswer arms the forwarder for the next statement any of its connections completes with tag, such as
@@ -80,27 +84,46 @@ func (f *Forwarder) accept() {
 		if err != nil {
 			return
 		}
+		f.track(client, true)
 		f.wg.Go(func() { f.relay(client) })
 	}
 }
 
+// track adds a connection to those the test's cleanup closes, or removes it once its relay closed it.
+func (f *Forwarder) track(conn net.Conn, open bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if open {
+		f.open[conn] = struct{}{}
+	} else {
+		delete(f.open, conn)
+	}
+}
+
+// relay copies one client's connection both ways; when either direction ends, for any reason, it closes both sockets
+// so the other direction ends too.
 func (f *Forwarder) relay(client net.Conn) {
+	defer f.track(client, false)
 	defer func() { _ = client.Close() }()
-	settings := f.db.Settings(RuntimeLogin)
-	server, err := net.Dial("tcp", net.JoinHostPort(settings.Host, strconv.Itoa(settings.Port)))
+	server, err := net.Dial("tcp", net.JoinHostPort(f.db.server.Host, f.db.server.Port))
 	if err != nil {
 		return
 	}
-	defer func() { _ = server.Close() }()
+	f.track(server, true)
+	defer f.track(server, false)
+	closeBoth := func() {
+		_ = client.Close()
+		_ = server.Close()
+	}
 	var stalled atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		f.toServer(client, server, &stalled)
+		closeBoth()
 	}()
 	f.toClient(server, client, &stalled)
-	_ = client.Close()
-	_ = server.Close()
+	closeBoth()
 	<-done
 }
 
@@ -175,7 +198,7 @@ func readMessage(conn net.Conn, typed bool) ([]byte, error) {
 		return nil, err
 	}
 	length := binary.BigEndian.Uint32(header[headerSize-4:])
-	if length < 4 || length > 1<<30 {
+	if length < 4 || length > maxMessage {
 		return nil, errors.New("malformed message")
 	}
 	message := make([]byte, headerSize+int(length)-4)

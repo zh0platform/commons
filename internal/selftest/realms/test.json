@@ -1,0 +1,26 @@
+{
+  "realm": "test",
+  "enabled": true,
+  "sslRequired": "all",
+  "clients": [
+    {
+      "clientId": "test-client",
+      "secret": "test-only-secret",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "redirectUris": ["https://app.test/callback"]
+    }
+  ],
+  "users": [
+    {
+      "username": "ada",
+      "enabled": true,
+      "email": "ada@example.com",
+      "emailVerified": true,
+      "firstName": "Ada",
+      "lastName": "Lovelace",
+      "credentials": [{"type": "password", "value": "test-only-password", "temporary": false}]
+    }
+  ]
+}

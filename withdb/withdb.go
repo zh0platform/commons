@@ -1,14 +1,30 @@
-// Command withdb runs a test command against a fresh PostgreSQL 18.7 server of its own: `go run ./test/withdb -- go test
-// ...`. Each run is one Compose project named for its process, removed with its volumes and built images on every
-// exit; a run killed before its cleanup is named by the next run's start. It exits 0 only when the command passed and
-// the project is gone.
-package main
+// Package withdb starts one run's test stack, a PostgreSQL server of its own and, if the product asks, a Keycloak, as
+// a Compose project, and runs a command against it. A product's runner program is a few lines around it:
+//
+//	stack, err := withdb.Start(product) // exit 1 on an error
+//	status, err := stack.Run(command)   // after any further step, such as Published
+//	err = stack.Close()                 // on every path once Start answered a stack
+//
+// The runner exits 2 for its own usage error, 1 when Start or a step before the command fails or the command could
+// not run, otherwise with the command's status, raised to at least 1 when Close fails. Each run removes its project and
+// its folder on every exit it makes itself; a run killed hard is named, with the commands that remove it, by the next
+// start of the same product on the same machine. A run never removes what another run started. One stack per process.
+//
+// With P the product's Variables, Compose and the product's own Compose files read P+ADMIN_PASSWORD, P+SERVER_CERT,
+// P+SERVER_KEY, P+SERVER_SPKI (the server key's pin, as Chromium takes it), P+PG_HBA, P+ROOT (the product's Root) and,
+// with Keycloak, KEYCLOAK_REALMS. The command gets P+DB_HOST, P+DB_PORT, P+DB_CA, P+DB_ADMIN_PASSWORD and
+// P+DB_LOGIN_PASSWORD; with Keycloak, KEYCLOAK_TEST_URL and KEYCLOAK_TEST_CA; when the product gives Compose files, also
+// Compose's values, COMPOSE_PROJECT_NAME and COMPOSE_FILE. Every process the runner starts gets the inherited
+// environment without the variables the product refuses, without every COMPOSE_* variable and without every name
+// above, so a shell that ran or exported another run's settings cannot point this run at that run's servers.
+package withdb
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -21,271 +37,221 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"git.kloudbox.de/commons/bff/internal/config"
-	"git.kloudbox.de/commons/bff/test/browser"
-	"git.kloudbox.de/commons/bff/test/keycloak"
-	"git.kloudbox.de/commons/bff/test/testdb"
+	"git.kloudbox.de/commons/commons/keycloak"
+	"git.kloudbox.de/commons/commons/testdb"
+)
+
+// The services and container ports of the stack.
+const (
+	postgresService = "postgres"
+	postgresPort    = "5432"
+	keycloakService = "keycloak"
+	keycloakPort    = "8443"
 )
 
 const (
-	composeFile  = "test/postgres.yaml"
-	keycloakFile = "test/keycloak/keycloak.yaml"
-	browserFile  = "test/browser/browser.yaml"
-	// projectPrefix names every project withdb starts. After it come this machine's tag and the process ID of the run
-	// that owns the project: the record from which a later start tells an orphan from another session's live run.
-	projectPrefix = "bff-test-"
-	startTimeout  = "240" // a cold Keycloak takes about a minute
+	// placeholder starts every variable the embedded Compose files read; the product's Variables replace it.
+	placeholder = "WITHDB_"
+	// startBound covers bringing the services up, including pulling their images on a cold machine.
+	startBound = 8 * time.Minute
+	// healthWait is Compose's own wait for the services' health; a cold Keycloak takes about a minute.
+	healthWait = "240"
+	// provisionBound covers creating the logins, the template and the schema.
+	provisionBound = time.Minute
+	// removeBound is the fresh bound of the removal, whatever ended the run.
+	removeBound = 2 * time.Minute
+	// callBound covers a Compose call that only reads (port, ls, logs).
+	callBound = 30 * time.Second
 )
 
-// hba allows TLS for every login, and plaintext only for bff's logins on the lost-commit tests' databases, which the
-// test forwarder reaches on loopback. The image's own health check uses the server's socket.
-const hba = `local all postgres trust
-hostssl all all 0.0.0.0/0 scram-sha-256
-hostssl all all ::/0 scram-sha-256
-hostnossl "/^` + testdb.PlaintextPrefix + `" bff_runtime,bff_migrate,bff_lifecycle 0.0.0.0/0 scram-sha-256
-`
+//go:embed postgres.yaml keycloak.yaml
+var embedded embed.FS
 
-func main() {
-	opts, command, err := parseArgs(os.Args[1:])
-	if err != nil {
-		fail(err.Error())
+// Stack is one run's started Compose project.
+type Stack struct {
+	product    testdb.Product
+	name       string
+	folder     string
+	files      []string // absolute, in order
+	base       []string // the inherited environment every process the runner starts gets
+	composeEnv []string // the run's values for Compose and the product's files
+	commandEnv []string // the run's values for the command
+	server     testdb.Server
+
+	signals chan os.Signal
+	mu      sync.Mutex
+	command *os.Process        // the running command, which receives every signal
+	cancel  context.CancelFunc // ends the Compose call in progress during Start
+	stopped bool               // a signal arrived before the command started
+	passed  bool               // the command ended with status 0
+}
+
+// Start checks the product's description, reports what killed runs of the product left, and brings up the run's
+// stack: its folder, authority, server certificate and passwords, the Compose files, the services, healthy, and the
+// provisioned server. It catches INT and TERM from then on. When a step fails or a signal arrives it prints the
+// services' logs (unless the product is quiet), removes what it started and answers the error; nothing is left to
+// close.
+func Start(p testdb.Product) (*Stack, error) {
+	if err := p.Check(); err != nil {
+		return nil, fmt.Errorf("setup failed: checking the description: %w", err)
 	}
-	os.Exit(run(command, opts))
-}
-
-// options are withdb's flags.
-type options struct {
-	keycloak, browser bool     // the browser stack brings Keycloak
-	quiet             bool     // a failed run prints no service logs (a CI job's shared log, as make capacity's)
-	extras            []string // --compose <file>: Compose files of the command's own, after the built-in ones
-}
-
-const usage = "usage: go run ./test/withdb [--keycloak] [--browser] [--quiet] [--compose <file>]... -- <command> [args...]"
-
-// parseArgs reads withdb's flags, in any order, up to `--`; what follows is the command.
-func parseArgs(args []string) (options, []string, error) {
-	var opts options
-	for len(args) > 0 {
-		switch args[0] {
-		case "--keycloak":
-			opts.keycloak = true
-		case "--browser":
-			opts.browser, opts.keycloak = true, true
-		case "--quiet":
-			opts.quiet = true
-		case "--compose":
-			if len(args) < 2 {
-				return options{}, nil, errors.New(usage)
-			}
-			opts.extras = append(opts.extras, args[1])
-			args = args[1:]
-		case "--":
-			if len(args) == 1 {
-				return options{}, nil, errors.New(usage)
-			}
-			return opts, args[1:], nil
-		default:
-			return options{}, nil, errors.New(usage)
+	s := &Stack{product: p, name: owner(p) + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(rand.Text()[:8])}
+	s.folder = filepath.Join(os.TempDir(), s.name)
+	s.base = inherited(p)
+	s.signals = make(chan os.Signal, 1)
+	signal.Notify(s.signals, os.Interrupt, syscall.SIGTERM)
+	go s.watch()
+	reportLeftovers(p)
+	if err := s.start(); err != nil {
+		if removeErr := s.remove(!p.Quiet); removeErr != nil {
+			err = errors.Join(err, removeErr)
 		}
-		args = args[1:]
+		s.stopSignals()
+		return nil, err
 	}
-	return options{}, nil, errors.New(usage)
+	return s, nil
 }
 
-func fail(message string) {
-	_, _ = fmt.Fprintln(os.Stderr, "withdb:", message)
-	os.Exit(2)
-}
-
-// run runs command against PostgreSQL and, with opts.keycloak, a Keycloak of the same project; opts.browser adds the
-// browser stack, opts.extras Compose files of the command's own.
-func run(command []string, opts options) int {
-	root, err := os.Getwd()
-	if err != nil {
-		fail(err.Error())
+func (s *Stack) start() error {
+	if err := os.Mkdir(s.folder, 0o700); err != nil {
+		return fmt.Errorf("setup failed: %w", err)
 	}
-	reportOrphans()
-	// withdb catches the stop signals instead of dying of them, so its cleanup always runs: one that arrives during
-	// setup skips the command, one during the command is passed on to it. (An ignored signal would be inherited by
-	// the command, which could then not be stopped.)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	p := project{root: root, name: owner() + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(rand.Text()[:8])}
-	code := 1
-	settings, err := startServer(p, opts)
-	switch {
-	case err != nil:
-		_, _ = fmt.Fprintln(os.Stderr, "withdb: setup failed:", err)
-	case len(stop) > 0:
-		_, _ = fmt.Fprintln(os.Stderr, "withdb: stopped during setup")
-	default:
-		code = runCommand(command, settings, stop)
+	if err := s.writeFiles(); err != nil {
+		return fmt.Errorf("setup failed: %w", err)
 	}
-	// A quiet run's output is shared (a CI job's log for make capacity, the owner's terminal for make protected): the
-	// services' logs, which can hold the provisioning's statements, stay out of it.
-	if code != 0 && !opts.quiet {
-		logs, _ := p.compose("logs", "--no-color")
-		_, _ = os.Stderr.Write(logs)
-	}
-	if _, err := p.compose("down", "--volumes", "--remove-orphans", "--rmi", "local"); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "withdb: removing the project failed:", err)
-		return max(code, 1)
-	}
-	return code
-}
-
-// project is one run's Compose project; env holds the values its Compose files read.
-type project struct {
-	root, name string
-	env        []string
-}
-
-// compose runs one Compose command on the project. Only `up` reads the Compose file (with the run's secrets); the
-// others address the project by its name.
-func (p project) compose(args ...string) ([]byte, error) {
-	cmd := exec.Command("docker", append([]string{"compose", "--project-name", p.name}, args...)...)
-	cmd.Dir, cmd.Env, cmd.Stderr = p.root, append(childEnviron(), p.env...), os.Stderr
-	return cmd.Output()
-}
-
-// owner is the start of this machine's project names: the prefix and a tag of its host name and, on Linux, its process
-// namespace, so a Docker daemon shared with another machine or container never makes process IDs this one cannot see
-// look dead here.
-func owner() string {
-	host, _ := os.Hostname()
-	namespace, _ := os.Readlink("/proc/self/ns/pid") // empty where there is none, as on macOS
-	tag := sha256.Sum256([]byte(host + "\x00" + namespace))
-	return projectPrefix + hex.EncodeToString(tag[:4]) + "-"
-}
-
-// published is the loopback address Docker chose for a service's port.
-func (p project) published(service, port string) (string, string, error) {
-	answer, err := p.compose("port", service, port)
-	if err != nil {
-		return "", "", fmt.Errorf("compose port %s: %w", service, err)
-	}
-	host, published, err := net.SplitHostPort(strings.TrimSpace(string(answer)))
-	if err != nil {
-		return "", "", fmt.Errorf("compose port %s answered %q", service, answer)
-	}
-	return host, published, nil
-}
-
-// reportOrphans names the projects of withdb runs on this machine whose process is gone (a run killed before its
-// cleanup), with the command that removes them. It removes nothing: a name is no proof of ownership (docker.md).
-func reportOrphans() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // it answers in well under a second
+	ctx, cancel := context.WithTimeout(context.Background(), startBound)
 	defer cancel()
-	listed, err := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json").Output()
+	s.mu.Lock()
+	s.cancel = cancel
+	stopped := s.stopped
+	s.mu.Unlock()
+	if stopped {
+		return errors.New("stopped during setup")
+	}
+	up := []string{}
+	for _, file := range s.files {
+		up = append(up, "--file", file)
+	}
+	up = append(up, "up", "--detach", "--wait", "--wait-timeout", healthWait)
+	if _, err := s.compose(ctx, up...); err != nil {
+		return s.setupError("bringing up", ctx, err)
+	}
+	host, port, err := s.Published(postgresService, postgresPort)
 	if err != nil {
-		return // advisory only: the run's own Compose calls meet a Docker that does not answer
+		return s.setupError("reading a port", ctx, err)
 	}
-	var projects []struct{ Name string }
-	_ = json.Unmarshal(listed, &projects)
-	for _, listedProject := range projects {
-		rest, ours := strings.CutPrefix(listedProject.Name, owner())
-		pid, _, _ := strings.Cut(rest, "-")
-		number, err := strconv.Atoi(pid)
-		if ours && err == nil && !processRuns(number) {
-			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: docker compose -p %s down --volumes --remove-orphans --rmi local\n",
-				listedProject.Name, listedProject.Name)
+	server := s.server
+	server.Host, server.Port = host, port
+	provisionCtx, cancelProvision := context.WithTimeout(ctx, provisionBound)
+	defer cancelProvision()
+	if err := testdb.Provision(provisionCtx, s.product, server); err != nil {
+		return s.setupError("provisioning", ctx, err)
+	}
+	s.commandEnv = s.product.ServerEnviron(server)
+	if s.product.Realms != "" {
+		host, port, err := s.Published(keycloakService, keycloakPort)
+		if err != nil {
+			return s.setupError("reading a port", ctx, err)
 		}
+		s.commandEnv = append(s.commandEnv,
+			keycloak.URLVariable+"=https://"+net.JoinHostPort(host, port), keycloak.CAVariable+"="+server.CA)
 	}
+	if len(s.product.Files) > 0 {
+		// The command addresses the stack with plain docker compose, over the same files in the same order.
+		s.commandEnv = append(s.commandEnv, s.composeEnv...)
+		s.commandEnv = append(s.commandEnv,
+			"COMPOSE_PROJECT_NAME="+s.name, "COMPOSE_FILE="+strings.Join(s.files, string(os.PathListSeparator)))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancel = nil
+	if s.stopped {
+		return errors.New("stopped during setup")
+	}
+	return nil
 }
 
-// processRuns says whether a process ID is in use on this machine. A process of another user answers EPERM and runs.
-func processRuns(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+// setupError names the failed step, or the signal or bound that ended it.
+func (s *Stack) setupError(step string, ctx context.Context, err error) error {
+	s.mu.Lock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	switch {
+	case stopped:
+		return errors.New("stopped during setup")
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("setup failed: %s: no answer within %v: %w", step, startBound, err)
+	}
+	return fmt.Errorf("setup failed: %s: %w", step, err)
 }
 
-// startServer starts the database and creates what infra provisions: the three logins and schema bff.
-func startServer(p project, opts options) (map[string]string, error) {
+// writeFiles makes the run's secrets and writes the module's Compose files, with the product's prefix, into the run's
+// folder. The secrets reach Compose only through its environment, never a file.
+func (s *Stack) writeFiles() error {
+	p := s.product
 	authority, err := testdb.NewAuthority()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	certPEM, keyPEM, err := authority.ServerCertificate()
+	certPEM, keyPEM, err := authority.ServerCertificate(p.Names...)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	spki, err := publicKeyPin(certPEM)
+	pin, err := publicKeyPin(certPEM)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	adminPassword, loginPassword := rand.Text(), rand.Text()
-	// Compose reads the servers' secrets from its own environment: nothing of them is written to a file a killed run
-	// could leave behind. The test command gets them too, for its own Compose commands (the browser stack).
+	s.server = testdb.Server{CA: authority.PEM(), AdminPassword: rand.Text(), LoginPassword: rand.Text()}
 	values := map[string]string{
-		"BFF_TEST_ADMIN_PASSWORD": adminPassword, "BFF_TEST_SERVER_CERT": certPEM,
-		"BFF_TEST_SERVER_KEY": keyPEM, "BFF_TEST_PG_HBA": hba,
-		// Chromium trusts exactly this run's server key, so every other site keeps its normal certificate checks.
-		"BFF_TEST_SERVER_SPKI": spki,
+		"ADMIN_PASSWORD": s.server.AdminPassword, "SERVER_CERT": certPEM, "SERVER_KEY": keyPEM,
+		"SERVER_SPKI": pin, "PG_HBA": hba(p), "ROOT": p.Root,
 	}
-	if opts.keycloak {
-		values["KEYCLOAK_REALMS"] = filepath.Join(p.root, "test/keycloak/realms")
+	for _, name := range composeSuffixes {
+		s.composeEnv = append(s.composeEnv, p.Variables+name+"="+values[name])
 	}
-	for name, value := range values {
-		p.env = append(p.env, name+"="+value)
+	names := []string{"postgres.yaml"}
+	if p.Realms != "" {
+		names = append(names, "keycloak.yaml")
+		s.composeEnv = append(s.composeEnv, "KEYCLOAK_REALMS="+p.Realms)
 	}
-	paths := []string{composeFile}
-	if opts.keycloak {
-		paths = append(paths, keycloakFile)
-	}
-	if opts.browser {
-		paths = append(paths, browserFile)
-	}
-	paths = append(paths, opts.extras...)
-	var files []string
-	for _, path := range paths {
-		files = append(files, "--file", path)
-	}
-	if _, err := p.compose(append(files, "up", "--detach", "--wait", "--wait-timeout", startTimeout)...); err != nil {
-		return nil, fmt.Errorf("compose up: %w", err)
-	}
-	host, port, err := p.published("postgres", "5432")
-	if err != nil {
-		return nil, err
-	}
-	settings := map[string]string{
-		testdb.HostVariable: host, testdb.PortVariable: port, testdb.CAVariable: authority.PEM(),
-		testdb.AdminVariable: adminPassword, testdb.LoginsVariable: loginPassword,
-	}
-	if opts.keycloak {
-		host, port, err := p.published("keycloak", "8443")
+	for _, name := range names {
+		content, err := embedded.ReadFile(name)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		settings[keycloak.URLVariable], settings[keycloak.CAVariable] = "https://"+net.JoinHostPort(host, port), authority.PEM()
-	}
-	if opts.browser {
-		host, port, err := p.published("chrome", "9222")
-		if err != nil {
-			return nil, err
+		path := filepath.Join(s.folder, name)
+		if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(content), placeholder, p.Variables)), 0o600); err != nil {
+			return err
 		}
-		// The test starts the bff services itself, on databases it migrated: it gets the Compose command line.
-		command, _ := json.Marshal(append([]string{"--project-name", p.name}, files...))
-		settings[browser.DevToolsVariable], settings[browser.ComposeVariable] = net.JoinHostPort(host, port), string(command)
+		s.files = append(s.files, path)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	if err := testdb.Provision(ctx, settings); err != nil {
-		return nil, fmt.Errorf("provision: %w", err)
+	for _, file := range p.Files {
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(p.Root, file)
+		}
+		s.files = append(s.files, file)
 	}
-	if opts.browser || len(opts.extras) > 0 {
-		maps.Copy(settings, values)
-	}
-	if len(opts.extras) > 0 {
-		// The command addresses the stack with plain docker compose, over the same files in the same order.
-		settings["COMPOSE_PROJECT_NAME"], settings["COMPOSE_FILE"] = p.name, strings.Join(paths, string(os.PathListSeparator))
-	}
-	return settings, nil
+	return nil
+}
+
+// composeSuffixes are the variables, after the product's prefix, that Compose and the product's files read.
+var composeSuffixes = []string{"ADMIN_PASSWORD", "SERVER_CERT", "SERVER_KEY", "SERVER_SPKI", "PG_HBA", "ROOT"}
+
+// hba allows TLS for every login, and plaintext only for the product's logins on the lost-commit tests' databases,
+// which the relay reaches on loopback. The image's own health check uses the server's socket.
+func hba(p testdb.Product) string {
+	return "local all postgres trust\n" +
+		"hostssl all all 0.0.0.0/0 scram-sha-256\n" +
+		"hostssl all all ::/0 scram-sha-256\n" +
+		`hostnossl "/^` + testdb.PlaintextPrefix + `" ` + strings.Join(p.Logins, ",") + " 0.0.0.0/0 scram-sha-256\n"
 }
 
 // publicKeyPin is the base64 SHA-256 of a PEM certificate's public key, the form Chromium's
@@ -303,63 +269,214 @@ func publicKeyPin(certPEM string) (string, error) {
 	return base64.StdEncoding.EncodeToString(sum[:]), nil
 }
 
-// runCommand runs the test command, passing on every stop signal withdb receives meanwhile.
-func runCommand(command []string, settings map[string]string, stop <-chan os.Signal) int {
+// Published is the loopback host and port Docker chose for a service's container port.
+func (s *Stack) Published(service, port string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), callBound)
+	defer cancel()
+	answer, err := s.compose(ctx, "port", service, port)
+	if err != nil {
+		return "", "", fmt.Errorf("compose port %s: %w", service, err)
+	}
+	host, published, err := net.SplitHostPort(strings.TrimSpace(string(answer)))
+	if err != nil {
+		return "", "", fmt.Errorf("compose port %s answered %q", service, answer)
+	}
+	return host, published, nil
+}
+
+// Run runs the command with the given NAME=value variables and the run's settings, which win over them and over every
+// inherited variable, and passes every INT and TERM the runner receives on to it. The command's lifetime has no bound
+// of its own: the caller's (a CI job's timeout) applies. It answers the command's status, at least 1 when it did not
+// end with 0; a command skipped by a signal that came first, or one that could not start, is an error with status 1.
+func (s *Stack) Run(command []string, variables ...string) (int, error) {
 	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = commandEnviron()
-	for name, value := range settings {
-		cmd.Env = append(cmd.Env, name+"="+value)
+	cmd.Env = slices.Concat(s.base, variables, s.commandEnv)
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return 1, errors.New("stopped during setup")
 	}
 	if err := cmd.Start(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "withdb:", err)
-		return 1
+		s.mu.Unlock()
+		return 1, err
 	}
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		for {
-			select {
-			case received := <-stop:
-				_ = cmd.Process.Signal(received)
-			case <-done:
-				return
+	s.command = cmd.Process
+	s.mu.Unlock()
+	err := cmd.Wait()
+	s.mu.Lock()
+	s.command = nil
+	s.mu.Unlock()
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		return max(exit.ExitCode(), 1), nil
+	}
+	if err != nil {
+		return 1, err
+	}
+	s.passed = true
+	return 0, nil
+}
+
+// Close prints the services' logs unless a command passed or the product is quiet, removes the project with its
+// volumes, orphans and locally built images, and the run's folder, under a fresh bound, and stops catching signals.
+// It answers an error naming the project and the commands that remove it when the removal fails.
+func (s *Stack) Close() error {
+	err := s.remove(!s.passed && !s.product.Quiet)
+	s.stopSignals()
+	return err
+}
+
+// remove prints the logs if asked and removes the project and the folder.
+func (s *Stack) remove(withLogs bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), removeBound)
+	defer cancel()
+	if withLogs {
+		logsCtx, cancelLogs := context.WithTimeout(ctx, callBound)
+		logs, _ := s.compose(logsCtx, "logs", "--no-color")
+		cancelLogs()
+		_, _ = os.Stderr.Write(logs)
+	}
+	// The folder goes only once the project is gone: it is what the next start finds a leftover by.
+	if _, err := s.compose(ctx, "down", "--volumes", "--remove-orphans", "--rmi", "local"); err != nil {
+		return fmt.Errorf("removing %s failed: %w; remove it with: %s", s.name, err, removal(s.name, s.folder))
+	}
+	if err := os.RemoveAll(s.folder); err != nil {
+		return fmt.Errorf("removing the folder of %s failed: %w; remove it with: rm -rf %s", s.name, err, quoted(s.folder))
+	}
+	return nil
+}
+
+// removal is the commands that remove a run's project, which need no Compose file, and its folder by hand.
+func removal(name, folder string) string {
+	return projectRemoval(name) + " && rm -rf " + quoted(folder)
+}
+
+func projectRemoval(name string) string {
+	return "docker compose -p " + name + " down --volumes --remove-orphans --rmi local"
+}
+
+// quoted is a path as one shell word.
+func quoted(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// compose runs one Compose command on the project, from the product's root, in the run's Compose environment.
+func (s *Stack) compose(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose", "--project-name", s.name}, args...)...)
+	cmd.Dir, cmd.Env, cmd.Stderr = s.product.Root, slices.Concat(s.base, s.composeEnv), os.Stderr
+	return cmd.Output()
+}
+
+// watch passes every INT and TERM to the running command; before the command, it marks the run stopped and ends the
+// Compose call in progress.
+func (s *Stack) watch() {
+	for received := range s.signals {
+		s.mu.Lock()
+		switch {
+		case s.command != nil:
+			_ = s.command.Signal(received)
+		default:
+			s.stopped = true
+			if s.cancel != nil {
+				s.cancel()
 			}
 		}
-	}()
-	if err := cmd.Wait(); err != nil {
-		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
-			return max(exit.ExitCode(), 1)
-		}
-		_, _ = fmt.Fprintln(os.Stderr, "withdb:", err)
-		return 1
+		s.mu.Unlock()
 	}
-	return 0
 }
 
-// commandEnviron is the test command's inherited environment: childEnviron without the addresses withdb hands a
-// command, which it sets for this run only. An inherited one (from a shell that ran or exported another run's) would
-// point a run without that service at the other run's server instead of failing.
-func commandEnviron() []string {
-	runnerVariables := []string{ // every address startServer can set
-		testdb.HostVariable, testdb.PortVariable, testdb.CAVariable, testdb.AdminVariable, testdb.LoginsVariable,
-		keycloak.URLVariable, keycloak.CAVariable, browser.DevToolsVariable, browser.ComposeVariable,
-		"COMPOSE_PROJECT_NAME", "COMPOSE_FILE",
-	}
-	return slices.DeleteFunc(childEnviron(), func(entry string) bool {
-		name, _, _ := strings.Cut(entry, "=")
-		return slices.Contains(runnerVariables, name)
+func (s *Stack) stopSignals() {
+	signal.Stop(s.signals)
+	close(s.signals)
+}
+
+// inherited is the runner's environment without the variables the product refuses, without Compose's own and
+// without every name the runner sets, so a shell that ran or exported another run's settings cannot point this run
+// at that run's servers.
+func inherited(p testdb.Product) []string {
+	runnerNames := slices.Concat(p.ServerVariables(), []string{
+		keycloak.URLVariable, keycloak.CAVariable, "KEYCLOAK_REALMS",
 	})
-}
-
-// childEnviron is this process's environment without the variables bff refuses at startup.
-func childEnviron() []string {
+	for _, suffix := range composeSuffixes {
+		runnerNames = append(runnerNames, p.Variables+suffix)
+	}
 	var kept []string
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if !config.IsAmbient(name) {
+		refused := p.Refused != nil && p.Refused(name)
+		if !refused && !strings.HasPrefix(name, "COMPOSE_") && !slices.Contains(runnerNames, name) {
 			kept = append(kept, entry)
 		}
 	}
 	return kept
+}
+
+// owner is the start of this product's project names on this machine: the product's prefix and a tag of the host
+// name and, on Linux, the process namespace, so a Docker daemon shared with another machine or container never makes
+// process IDs this one cannot see look dead here.
+func owner(p testdb.Product) string {
+	host, _ := os.Hostname()
+	namespace, _ := os.Readlink("/proc/self/ns/pid") // empty where there is none, as on macOS
+	tag := sha256.Sum256([]byte(host + "\x00" + namespace))
+	return p.Project + hex.EncodeToString(tag[:4]) + "-"
+}
+
+// reportLeftovers names the projects and folders of this product's runs on this machine whose process is gone (a run
+// killed before its cleanup), with the commands that remove them. It removes nothing: a name is no proof of ownership.
+// A failed listing is not fatal: the run's own Compose calls meet a Docker that does not answer. It sees only the
+// projects of the Docker daemon it reaches and the folders under this process's temporary folder;
+// Docker objects made before a run's first container are not listed by Compose.
+func reportLeftovers(p testdb.Product) {
+	prefix := owner(p)
+	dead := map[string]bool{} // name -> whether Compose lists a project of that name
+	ctx, cancel := context.WithTimeout(context.Background(), callBound)
+	defer cancel()
+	if listed, err := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json").Output(); err == nil {
+		var projects []struct{ Name string }
+		_ = json.Unmarshal(listed, &projects)
+		for _, project := range projects {
+			if isLeftover(prefix, project.Name) {
+				dead[project.Name] = true
+			}
+		}
+	}
+	if entries, err := os.ReadDir(os.TempDir()); err == nil {
+		for _, entry := range entries {
+			if _, listed := dead[entry.Name()]; !listed && entry.IsDir() && isLeftover(prefix, entry.Name()) {
+				dead[entry.Name()] = false
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(dead)) {
+		folder := filepath.Join(os.TempDir(), name)
+		switch _, err := os.Stat(folder); {
+		case !dead[name]:
+			_, _ = fmt.Fprintf(os.Stderr, "withdb: the folder %s is left from a run that ended without its cleanup; remove it with: rm -rf %s\n", folder, quoted(folder))
+		case err == nil:
+			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: %s\n", name, removal(name, folder))
+		default:
+			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: %s\n", name, projectRemoval(name))
+		}
+	}
+}
+
+// runSuffix is what follows a run's owner prefix: its process ID and 8 random characters (lowercased base32).
+var runSuffix = regexp.MustCompile(`^([0-9]+)-[a-z2-7]{8}$`)
+
+// isLeftover says whether a name is one of this machine's runs of the product whose process is gone. A name is no
+// proof of who made it; the report only names what matches.
+func isLeftover(prefix, name string) bool {
+	rest, ours := strings.CutPrefix(name, prefix)
+	found := runSuffix.FindStringSubmatch(rest)
+	if !ours || found == nil {
+		return false
+	}
+	pid, err := strconv.Atoi(found[1])
+	return err == nil && !processRuns(pid)
+}
+
+// processRuns says whether a process ID is in use on this machine. A process of another user answers EPERM and runs.
+func processRuns(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
