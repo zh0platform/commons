@@ -111,16 +111,9 @@ func TestRelayClosesAConnectionWhoseMessageExceedsTheCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertClosed(t, oversized)
-	settings := relay.Settings(selftest.RuntimeLogin)
-	config, err := pgx.ParseConfig(fmt.Sprintf("host=%s port=%d dbname=%s user=%s sslmode=disable",
-		settings.Host, settings.Port, settings.Database, settings.Login))
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.Password = settings.Password
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conn, err := pgx.ConnectConfig(ctx, config)
+	conn, err := plainConnect(relay.Settings(selftest.RuntimeLogin))
 	if err != nil {
 		t.Fatalf("connect through the relay after an oversized message: %v", err)
 	}
@@ -153,20 +146,57 @@ func TestPlaintextAdmitsOnlyTheListedLogins(t *testing.T) {
 	plaintext.Connect(t, selftest.RecoveryLogin, plaintext.LoginsPassword())
 }
 
-func connectWithoutTLS(settings testdb.Settings) error {
+// An arm that skips one completion lets the first tagged statement through, whichever connection completes it, and
+// withholds the second one's answer, on another connection, after its work commits.
+func TestRelayDropsTheAnswerAfterTheSkippedCompletions(t *testing.T) {
+	database := testdb.NewPlaintext(t, product(t))
+	ctx := context.Background()
+	if _, err := database.Admin(t).Exec(ctx, "CREATE TABLE public.relayed (n int); GRANT INSERT ON public.relayed TO "+selftest.RuntimeLogin); err != nil {
+		t.Fatal(err)
+	}
+	relay := testdb.NewForwarder(t, database)
+	first, err := plainConnect(relay.Settings(selftest.RuntimeLogin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close(ctx) }()
+	second, err := plainConnect(relay.Settings(selftest.RuntimeLogin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close(ctx) }()
+	relay.DropAnswerAfter("INSERT", 1)
+	if _, err := first.Exec(ctx, "INSERT INTO public.relayed VALUES (1)"); err != nil {
+		t.Fatalf("the skipped completion: %v, want answered", err)
+	}
+	if _, err := second.Exec(ctx, "INSERT INTO public.relayed VALUES (2)"); err == nil {
+		t.Fatal("the armed completion was answered, want its answer withheld")
+	}
+	var rows int
+	if err := database.Admin(t).QueryRow(ctx, "SELECT count(*) FROM public.relayed").Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("rows = %d, %v, want both inserts committed", rows, err)
+	}
+}
+
+// plainConnect connects without TLS, through a relay or straight to a plaintext database.
+func plainConnect(settings testdb.Settings) (*pgx.Conn, error) {
 	config, err := pgx.ParseConfig(fmt.Sprintf("host=%s port=%d dbname=%s user=%s sslmode=disable",
 		settings.Host, settings.Port, settings.Database, settings.Login))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	config.Password = settings.Password
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conn, err := pgx.ConnectConfig(ctx, config)
+	return pgx.ConnectConfig(ctx, config)
+}
+
+func connectWithoutTLS(settings testdb.Settings) error {
+	conn, err := plainConnect(settings)
 	if err != nil {
 		return err
 	}
-	return conn.Close(ctx)
+	return conn.Close(context.Background())
 }
 
 func dial(t *testing.T, relay *testdb.Forwarder) net.Conn {

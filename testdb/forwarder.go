@@ -23,7 +23,8 @@ const maxMessage = 1 << 20
 type Forwarder struct {
 	db         *Database
 	listener   net.Listener
-	dropTag    atomic.Pointer[string]
+	dropMu     sync.Mutex
+	drop       dropArm // guarded by dropMu
 	stallArmed atomic.Bool
 	commits    atomic.Int32
 	wg         sync.WaitGroup
@@ -63,10 +64,41 @@ func (f *Forwarder) Settings(login string) Settings {
 	return settings
 }
 
+// dropArm is what the forwarder is armed to withhold: the completion after skip more with a tag starting with tag.
+type dropArm struct {
+	armed bool
+	tag   string
+	skip  int
+}
+
 // DropNextAnswer arms the forwarder for the next statement any of its connections completes with tag, such as
 // "COMMIT" or "INSERT".
 func (f *Forwarder) DropNextAnswer(tag string) {
-	f.dropTag.Store(&tag)
+	f.DropAnswerAfter(tag, 0)
+}
+
+// DropAnswerAfter arms the forwarder like DropNextAnswer, but lets the next skip such completions pass first, counted
+// over all of its connections. Arming again replaces an earlier arm.
+func (f *Forwarder) DropAnswerAfter(tag string, skip int) {
+	f.dropMu.Lock()
+	defer f.dropMu.Unlock()
+	f.drop = dropArm{armed: true, tag: tag, skip: skip}
+}
+
+// takeDrop reports whether a completion with this command tag is the armed one, which disarms the forwarder; a
+// skipped completion counts down the arm.
+func (f *Forwarder) takeDrop(completed string) bool {
+	f.dropMu.Lock()
+	defer f.dropMu.Unlock()
+	if !f.drop.armed || !strings.HasPrefix(completed, f.drop.tag) {
+		return false
+	}
+	if f.drop.skip > 0 {
+		f.drop.skip--
+		return false
+	}
+	f.drop.armed = false
+	return true
 }
 
 // StallAfterNextQuery arms the forwarder to withhold every answer after the next simple query on any of its
@@ -177,8 +209,8 @@ func (f *Forwarder) toClient(server, client net.Conn, stalled *atomic.Bool) {
 		if stalled.Load() {
 			continue
 		}
-		if tag := f.dropTag.Load(); !dropping && tag != nil && message[0] == 'C' && strings.HasPrefix(string(message[5:]), *tag) {
-			dropping = f.dropTag.CompareAndSwap(tag, nil)
+		if !dropping && message[0] == 'C' && f.takeDrop(string(message[5:])) {
+			dropping = true
 		}
 		if dropping {
 			if message[0] == 'Z' {

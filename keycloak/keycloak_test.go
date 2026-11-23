@@ -17,7 +17,7 @@ func TestSignInThroughTheRealmsForm(t *testing.T) {
 	user := realm.Users[0]
 	query := url.Values{
 		"client_id": {realm.Clients[0].ID}, "response_type": {"code"}, "scope": {"openid"},
-		"redirect_uri": {"https://app.test/callback"}, "state": {"state-1"},
+		"redirect_uri": {realm.Clients[0].RedirectURIs[0]}, "state": {"state-1"},
 	}
 	authorization := address + "/realms/" + realm.Name + "/protocol/openid-connect/auth?" + query.Encode()
 	callback := keycloak.SignIn(t, keycloak.Browser(t, authority), authorization, user.Name, user.Credentials[0].Value)

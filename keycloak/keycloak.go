@@ -31,8 +31,9 @@ var formAction = regexp.MustCompile(`<form[^>]*id="kc-form-login"[^>]*action="([
 type Realm struct {
 	Name    string `json:"realm"`
 	Clients []struct {
-		ID     string `json:"clientId"`
-		Secret string `json:"secret"`
+		ID           string   `json:"clientId"`
+		Secret       string   `json:"secret"`
+		RedirectURIs []string `json:"redirectUris"` // empty when the file names none
 	} `json:"clients"`
 	Users []struct {
 		Name        string `json:"username"`
