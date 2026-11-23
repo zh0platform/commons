@@ -3,8 +3,26 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
-## Unreleased
+## Unreleased (v0.2.0)
 
+Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.2):
+
+- `withdb`: `Start` and the stack's `Published`, `Run` and `Close` are gone. A runner `main` parses its flags and exits
+  with `withdb.Run(product, command)`, which prints its errors (each line after `withdb: `) and answers the exit
+  status by the same rule as before; an empty command is refused before the stack comes up.
+- `testdb`: `ClosedPort`, `Authority` (with its methods `PEM` and `ServerCertificate`) and `NewAuthority` moved, unchanged,
+  to the new package `nettest`.
+- `withdb`: `<prefix>DEVTOOLS` is no longer inherited by any run; with `Product.Browser` the service name `chrome`
+  belongs to the module, and a product file's `chrome` block merges into it (give flags as its `command` list only).
+
+Additive:
+
+- `standin`: an identity provider's keys and key set for tests (keycloak and auth0 paths, rotation, failure, held and
+  replaced answers, fetch counts) and tokens with exactly the caller's header. Its held fetch answers with the state at
+  its release; a stand-in that answered with the state before the wait behaves differently for a test that changes
+  the state during a hold.
+- `testdb.Product.Browser` and `testdb.Product.PlaintextLogins`; `Forwarder.DropAnswerAfter(tag, skip)`;
+  `keycloak.Realm` clients' `RedirectURIs`. The module requires `github.com/go-jose/go-jose/v4`.
 - `withdb`: provisioning has a bound of its own instead of what is left of the start's, so an expired one is named
   truthfully. A test pins the relay's cleanup against a server that stopped reading.
 

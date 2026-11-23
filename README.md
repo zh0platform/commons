@@ -1,9 +1,10 @@
 # commons
 
-Shared Go code of the owner's products, imported as `git.kloudbox.de/commons/commons` (private). Today it holds the
-database test tooling: a runner that starts one run's own PostgreSQL (and, if asked, Keycloak) as a Compose project
-and runs a command against it, per-test databases cloned from a template, a PostgreSQL protocol relay for lost-commit
-tests, a test certificate authority, Keycloak sign-in helpers and second-factor codes.
+Shared Go code of the owner's products, imported as `git.kloudbox.de/commons/commons` (private). Today it holds test
+tooling: a runner that starts one run's own PostgreSQL (and, if asked, Keycloak and Chromium) as a Compose project and
+runs a command against it, per-test databases cloned from a template, a PostgreSQL protocol relay for lost-commit
+tests, a test certificate authority, the key side of a test identity provider, Keycloak sign-in helpers and
+second-factor codes.
 
 **Non-goals.** Anything of one product's own logic: its tables, setting names, tenants or migrations. Secrets or one
 deployment's settings. Python or Node tooling. Production code arrives only after its own design.
@@ -16,21 +17,24 @@ code stays in that project until a second one needs the same.
 
 | Package | Holds |
 |---|---|
-| `withdb` | starting one run's stack, running the command, removing the stack; the embedded Compose files |
-| `testdb` | the product description (`Product`), provisioning, per-test databases, the restore like infrastructure's, the relay, the test authority |
+| `withdb` | `Run`: starting one run's stack, running the command, removing the stack; the embedded Compose files |
+| `testdb` | the product description (`Product`), provisioning, per-test databases, the restore like infrastructure's, the relay |
+| `nettest` | a loopback port nothing listens on, the test certificate authority |
+| `standin` | an identity provider's keys and key set for tests, and tokens signed with exactly the header the caller states |
 | `keycloak` | where the run's Keycloak is, a client that trusts it, what a realm file declares, the sign-in through its form |
 | `totp` | RFC 6238 codes |
 
 ## Using it
 
 A product describes itself once, in a `testdb.Product` (its prefixes, logins, template, schema, migration step, the
-variables it refuses), and writes a small runner `main` around `withdb.Start`, `Stack.Run` and `Stack.Close`; the
-package documentation of `withdb` states the exit rule. Its tests call `testdb.New`, `NewMigrated` or `NewPlaintext`
+variables it refuses), and writes a small runner `main` that parses its flags and exits with
+`withdb.Run(product, command)`; the package documentation of `withdb` states the exit rule. Its tests call `testdb.New`, `NewMigrated` or `NewPlaintext`
 with the same `Product`. `internal/selftest` is a complete example: the module's own test product, with the agent's
 parameters.
 
-The services are `postgres` (container port 5432) and, with a realm folder, `keycloak` (8443, network alias
-`idp.test`), both on ephemeral loopback ports. The server certificate names `127.0.0.1`, `::1`, `host.docker.internal`,
+The services are `postgres` (container port 5432), with a realm folder `keycloak` (8443, network alias `idp.test`) and,
+with `Browser`, `chrome` (DevTools on 9222, its address handed to the command as `<prefix>DEVTOOLS`; a product's
+Compose file may give its `command` list as Chromium flags), all on ephemeral loopback ports. The server certificate names `127.0.0.1`, `::1`, `host.docker.internal`,
 `postgres`, `idp.test` and the product's `Names`, never `localhost`. The variables handed to the command and to Compose,
 and the server-flag variable a product's own Compose file may set (`<prefix>PG_FLAGS`), are listed in the `withdb`
 documentation; they carry the product's prefix.
@@ -93,11 +97,20 @@ CI on a candidate tag (`vX.Y.Z-rc.N`) before the release tag goes on the same co
   under another temporary folder are not found. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
 - **ownership**: A run changes only the project and folder it created; leftovers of other runs are reported, never
   removed. Shown across processes, since the package allows one stack per process. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
-- **trust**: Settings. The command gets this run's settings only (its addresses, passwords and certificate material);
-  no inherited setting of another run of the product, no inherited Compose setting and no inherited variable the
-  product refuses reaches it; the caller's own further variables are trusted input. Tests: `withdb/withdb_test.go::TestInheritedDropsRunnerSettingsComposeAndRefusedVariables`, `withdb/stack_test.go::the command's environment`
+- **trust**: Settings. The command gets this run's settings only (its addresses, the DevTools address, passwords and
+  certificate material); no inherited setting of another run of the product, no inherited Compose setting and no
+  inherited variable the product refuses reaches it. Tests: `withdb/withdb_test.go::TestInheritedDropsRunnerSettingsComposeAndRefusedVariables`, `withdb/stack_test.go::the command's environment`
 - **trust**: Secrets. The login password and the server key are in no host file the module writes, in none of its
   output, and in no server log line from provisioning, whatever logging flags a product gives the server. Tests: `withdb/stack_test.go::failed start, statements logged`
+- **trust**: Plaintext. Over TCP without TLS the server admits only the product's plaintext logins (every product login
+  when it lists none), and only on the plaintext-prefix databases; every other connection needs TLS (the
+  administrator's socket inside the container is unchanged). Tests:
+  `withdb/withdb_test.go::TestPlaintextRuleNamesItsLogins`,
+  `testdb/testdb_database_test.go::TestPlaintextAdmitsOnlyTheListedLogins`
+- **trust**: Tokens. A stand-in token's protected header is exactly the members its caller stated plus `alg` (and the
+  stand-in's key ID when its own key signs), each replacing a caller's member of that name; nothing adds a `typ`, and
+  the caller's header is not changed. The stand-in's private keys never leave it. Tests:
+  `standin/standin_test.go::TestTokenHeaderIsTheCallersHeader`
 - **cleanup**: Tests. A test database and a relay end with the test that made them: the database is dropped and every
   connection the relay accepted is closed, also one blocked writing to a server that stopped reading. Tests:
   `testdb/testdb_database_test.go::TestDatabaseAndRelayEndWithTheirTest`,

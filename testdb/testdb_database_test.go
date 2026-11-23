@@ -139,7 +139,7 @@ func TestPlaintextAdmitsOnlyTheListedLogins(t *testing.T) {
 	} {
 		err := connectWithoutTLS(c.database.Settings(c.login))
 		var refused *pgconn.PgError
-		if c.admitted && err != nil || !c.admitted && !(errors.As(err, &refused) && refused.Code == "28000") {
+		if c.admitted && err != nil || !c.admitted && (!errors.As(err, &refused) || refused.Code != "28000") {
 			t.Errorf("connect %s to %s without TLS = %v, want admitted %v (a refusal is SQLSTATE 28000)", c.login, c.database.Name, err, c.admitted)
 		}
 	}

@@ -38,7 +38,7 @@ func get(s *standin.StandIn, profile string) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(response.Body)
 	return response.StatusCode, body, err
 }
@@ -138,7 +138,7 @@ func TestStandInServesOnTheCallersMux(t *testing.T) {
 		t.Fatal(err)
 	}
 	set, _ := io.ReadAll(response.Body)
-	response.Body.Close()
+	_ = response.Body.Close()
 	for _, typ := range []any{nil, "logout+jwt"} {
 		header := map[string]any{}
 		if typ != nil {

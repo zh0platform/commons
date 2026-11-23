@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -184,9 +185,7 @@ func (s *StandIn) Mint(header map[string]any, payload []byte) (string, error) {
 	id, key := s.current, s.signers[s.current]
 	s.mu.Unlock()
 	members := make(map[string]any, len(header)+1)
-	for name, value := range header {
-		members[name] = value
-	}
+	maps.Copy(members, header)
 	members["kid"] = id
 	return SignPayload(key, string(jose.ES256), members, payload)
 }

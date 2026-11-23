@@ -73,8 +73,8 @@ const (
 	// a minute; with extraction about 3 minutes, so 8 leaves more than twice that. Warm: about 3 s, 36 s with Keycloak.
 	startBound = 8 * time.Minute
 	// healthWait is Compose's own wait for the services' health, inside startBound: a cold Keycloak takes about a
-	// minute to be healthy (36 s warm on the CI host), so 4 minutes. Both bounds already held bff's browser runs, which
-	// brought up the same Chromium image beside PostgreSQL and Keycloak through a product file.
+	// minute to be healthy (36 s warm on the CI host), so 4 minutes. Both bounds already held a product's browser runs,
+	// which brought up the same Chromium image beside PostgreSQL and Keycloak through the product's own file.
 	healthWait = "240"
 	// provisionBound covers creating the logins, the template and the schema: under a second measured, a minute for a
 	// loaded host.

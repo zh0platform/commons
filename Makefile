@@ -63,6 +63,8 @@ vet:
 tidy-check:
 	go mod tidy -diff
 
-# The module is shared by several products: no Go or YAML file of it names one.
+# The module is shared by several products: no Go or YAML file of it names one. The test product carries the agent's
+# parameters on purpose, so its folder and the tests that drive it (withdb's and testdb's) may name the agent.
 names:
-	@! git grep --untracked -il -e bff -- '*.go' '*.yaml' '*.yml' || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
+	@! git grep --untracked -il -e bff -e membership -- '*.go' '*.yaml' '*.yml' || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
+	@! git grep --untracked -il -e agent -- '*.go' '*.yaml' '*.yml' ':!internal/selftest' ':!withdb/*_test.go' ':!testdb/*_test.go' || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
