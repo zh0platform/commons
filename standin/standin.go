@@ -1,18 +1,22 @@
-// Package standin is an OpenID provider's key side in the test process: HTTPS on a loopback port, the key set at both
-// profiles' paths, ES256 access tokens under P-256 keys made in the process. A test rotates keys, makes
-// key fetches fail or wait, replaces the answer, and counts the fetches. Wrong signatures, algorithms and weak keys
-// are built by the verifier tests themselves (Sign, SignPayload).
+// Package standin is the key side of an OpenID provider for tests: ES256 keys made in the process, the key set served
+// at a profile's path, and tokens signed with those keys or with a caller's own. A test rotates the keys, makes key
+// fetches fail, wait or answer other bytes, and counts the fetches. Every token's protected header is the one its
+// caller states; nothing adds a type or a key the caller did not name, apart from the stand-in's own key ID.
 package standin
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,57 +24,86 @@ import (
 	"github.com/go-jose/go-jose/v4"
 )
 
-// The audience and subject of the stand-in's tokens by default.
+// The audience and subject of Claims by default; they name no product. A product that needs its own keeps its own.
 const (
-	Audience = "https://agent.example"
+	Audience = "https://api.example"
 	Subject  = "user-1"
 )
 
-// StandIn is one running stand-in.
+// StandIn is one stand-in's keys and key set.
 type StandIn struct {
-	Issuer   string
-	trustPEM string // the server certificate clients trust
-	profile  string
+	// Issuer is the issuer the stand-in was made for, the "iss" of Claims.
+	Issuer string
+	// TrustPEM is the certificate a client trusts to reach a stand-in made by Start; empty with New, whose caller owns
+	// the server and its certificate.
+	TrustPEM string
 
 	mu        sync.Mutex
 	signers   map[string]*ecdsa.PrivateKey // keys by ID
-	current   string                       // the key ID tokens are signed with
+	current   string                       // the ID of the key tokens are signed with
 	fetches   int
 	failing   bool
-	held      chan struct{} // while set, fetches wait until it is closed
-	published []byte        // when set, the key set answer instead of the keys
+	held      chan struct{} // while set, key fetches wait until it is closed
+	published []byte        // when set, the key set's answer instead of the keys
 }
 
-// Start runs a stand-in of profile ("keycloak" or "auth0") with one key until the test ends.
+// New makes a stand-in of profile ("keycloak" or "auth0") for issuer with one key and serves its key set on mux at
+// the profile's path under the issuer's path: "<path>/protocol/openid-connect/certs" for keycloak, whose issuer does
+// not end in a slash, and "<path>.well-known/jwks.json" for auth0, whose issuer does. It refuses an unknown profile,
+// an issuer that is not https with a host or that carries a user, a query or a fragment, and an issuer in the other
+// profile's form. It starts no server.
+func New(profile, issuer string, mux *http.ServeMux) (*StandIn, error) {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("stand-in issuer %q: want https with a host and no user, query or fragment", issuer)
+	}
+	slash := strings.HasSuffix(issuer, "/")
+	var path string
+	switch profile {
+	case "keycloak":
+		if slash {
+			return nil, fmt.Errorf("stand-in issuer %q: a keycloak issuer does not end in a slash", issuer)
+		}
+		path = u.Path + "/protocol/openid-connect/certs"
+	case "auth0":
+		if !slash {
+			return nil, fmt.Errorf("stand-in issuer %q: an auth0 issuer ends in a slash", issuer)
+		}
+		path = u.Path + ".well-known/jwks.json"
+	default:
+		return nil, fmt.Errorf("stand-in profile %q: want keycloak or auth0", profile)
+	}
+	s := &StandIn{Issuer: issuer, signers: map[string]*ecdsa.PrivateKey{}}
+	s.Rotate()
+	mux.HandleFunc(path, s.keys)
+	return s, nil
+}
+
+// Start runs a stand-in of profile on a TLS test server on a loopback port until the test ends: issuer
+// "<server>/realms/test" for keycloak, "<server>/" for auth0, with TrustPEM set.
 func Start(t testing.TB, profile string) *StandIn {
 	t.Helper()
 	mux := http.NewServeMux()
 	server := httptest.NewTLSServer(mux)
 	t.Cleanup(server.Close)
-	s := &StandIn{Issuer: server.URL + "/realms/agent", profile: profile, signers: map[string]*ecdsa.PrivateKey{},
-		trustPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))}
-	path := "/realms/agent/protocol/openid-connect/certs"
+	issuer := server.URL + "/realms/test"
 	if profile == "auth0" {
-		s.Issuer, path = server.URL+"/", "/.well-known/jwks.json"
+		issuer = server.URL + "/"
 	}
-	mux.HandleFunc(path, s.keys)
-	s.Rotate(t)
+	s, err := New(profile, issuer, mux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.TrustPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))
 	return s
 }
 
-// Environ is the provider settings for this stand-in, with its certificate as OIDC_TRUST_CA (ENVIRONMENT test).
-func (s *StandIn) Environ() []string {
-	return []string{"IDENTITY_PROVIDER=" + s.profile, "OIDC_ISSUER=" + s.Issuer, "OIDC_AUDIENCE=" + Audience,
-		"OIDC_TRUST_CA=" + s.trustPEM, "ENVIRONMENT=test"}
-}
-
-// Rotate publishes a new key and signs the following tokens with it; earlier keys stay published. It
-// returns the new key's ID.
-func (s *StandIn) Rotate(t testing.TB) string {
-	t.Helper()
+// Rotate publishes a new P-256 key and signs the following tokens with it; earlier keys stay published. It returns
+// the new key's ID.
+func (s *StandIn) Rotate() string {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatal(err)
+		panic(err) // crypto/rand's reader does not fail
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -79,26 +112,33 @@ func (s *StandIn) Rotate(t testing.TB) string {
 	return s.current
 }
 
-// Fail makes every key fetch answer 503 while on is true.
+// Fail makes every key fetch answer 503 while on is true; it wins over Answer.
 func (s *StandIn) Fail(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failing = on
 }
 
-// Answer replaces the key set answer with body (an empty set, weak keys, malformed JSON) until Answer(nil).
+// Answer replaces the key set's answer with a copy of body, whatever it is (an empty, non-nil body answers nothing),
+// until Answer(nil).
 func (s *StandIn) Answer(body []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.published = body
+	s.published = bytes.Clone(body)
 }
 
-// Hold makes key fetches wait until release is called; the test's cleanup releases them too, so a failed test cannot
-// hang the server's close.
-func (s *StandIn) Hold(t *testing.T) (release func()) {
+// Hold makes key fetches wait until release is called. A held fetch answers with the state it finds when it resumes.
+// The test's cleanup releases too, so a failed test cannot hang a server whose close was registered before; a second
+// Hold while one is active fails the test.
+func (s *StandIn) Hold(t testing.TB) (release func()) {
 	t.Helper()
 	held := make(chan struct{})
 	s.mu.Lock()
+	if s.held != nil {
+		s.mu.Unlock()
+		t.Fatalf("stand-in: Hold while an earlier hold is active; release it first")
+		return func() {}
+	}
 	s.held = held
 	s.mu.Unlock()
 	var once sync.Once
@@ -114,14 +154,14 @@ func (s *StandIn) Hold(t *testing.T) (release func()) {
 	return release
 }
 
-// Fetches counts the key set requests the stand-in received.
+// Fetches counts the key set requests the stand-in received, a held one from its arrival.
 func (s *StandIn) Fetches() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fetches
 }
 
-// Claims is the stand-in's default claims (issuer, audience, subject, iat and a five-minute exp from now) with
+// Claims is the stand-in's default claims (issuer, Audience, Subject, iat now and exp in five minutes) with
 // overrides on top; a nil override removes the claim.
 func (s *StandIn) Claims(overrides map[string]any) map[string]any {
 	now := time.Now()
@@ -136,30 +176,42 @@ func (s *StandIn) Claims(overrides map[string]any) map[string]any {
 	return claims
 }
 
-// Token returns Claims(overrides) as an access token signed with the current key, typ at+jwt.
-func (s *StandIn) Token(t testing.TB, overrides map[string]any) string {
+// Mint returns payload, byte for byte, as a compact token signed with the current key under ES256. Its protected
+// header is header's members plus "alg" and the key's "kid", which replace members of those names; header itself is
+// not changed.
+func (s *StandIn) Mint(header map[string]any, payload []byte) (string, error) {
+	s.mu.Lock()
+	id, key := s.current, s.signers[s.current]
+	s.mu.Unlock()
+	members := make(map[string]any, len(header)+1)
+	for name, value := range header {
+		members[name] = value
+	}
+	members["kid"] = id
+	return SignPayload(key, string(jose.ES256), members, payload)
+}
+
+// Token returns Claims(overrides) minted with header; an error fails the test.
+func (s *StandIn) Token(t testing.TB, header, overrides map[string]any) string {
 	t.Helper()
 	payload, err := json.Marshal(s.Claims(overrides))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s.TokenOf(t, payload)
+	return s.TokenOf(t, header, payload)
 }
 
-// TokenOf returns payload, byte for byte, as an access token signed with the current key, typ at+jwt.
-func (s *StandIn) TokenOf(t testing.TB, payload []byte) string {
+// TokenOf returns payload minted with header; an error fails the test.
+func (s *StandIn) TokenOf(t testing.TB, header map[string]any, payload []byte) string {
 	t.Helper()
-	s.mu.Lock()
-	id, key := s.current, s.signers[s.current]
-	s.mu.Unlock()
-	token, err := SignPayload(key, jose.ES256, map[jose.HeaderKey]any{"kid": id, "typ": "at+jwt"}, payload)
+	token, err := s.Mint(header, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return token
 }
 
-// Signed reports whether raw is a compact JWS that one of the stand-in's keys signed.
+// Signed reports whether raw is a compact ES256 token that one of the stand-in's keys signed.
 func (s *StandIn) Signed(raw string) bool {
 	parsed, err := jose.ParseSignedCompact(raw, []jose.SignatureAlgorithm{jose.ES256})
 	if err != nil {
@@ -175,19 +227,28 @@ func (s *StandIn) Signed(raw string) bool {
 	return false
 }
 
-// Sign returns claims as a compact JWS signed with key under algorithm, naming the key ID, typ at+jwt.
-func Sign(key crypto.Signer, algorithm jose.SignatureAlgorithm, id string, claims map[string]any) (string, error) {
+// Sign returns claims as a compact token signed with key under algorithm (a JOSE name such as "ES256"), with
+// header as its protected header plus "alg".
+func Sign(key crypto.Signer, algorithm string, header, claims map[string]any) (string, error) {
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
 	}
-	return SignPayload(key, algorithm, map[jose.HeaderKey]any{"kid": id, "typ": "at+jwt"}, payload)
+	return SignPayload(key, algorithm, header, payload)
 }
 
-// SignPayload returns payload as a compact JWS signed with key under algorithm, with the given protected header
-// members besides the algorithm.
-func SignPayload(key crypto.Signer, algorithm jose.SignatureAlgorithm, header map[jose.HeaderKey]any, payload []byte) (string, error) {
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: algorithm, Key: key}, &jose.SignerOptions{ExtraHeaders: header})
+// SignPayload returns payload, byte for byte, as a compact token signed with key under algorithm, with header as its
+// protected header plus "alg", which replaces a member of that name; any JSON value is kept, null included, and header
+// itself is not changed. An algorithm the key cannot sign under is an error.
+func SignPayload(key crypto.Signer, algorithm string, header map[string]any, payload []byte) (string, error) {
+	members := make(map[jose.HeaderKey]any, len(header))
+	for name, value := range header {
+		if name != "alg" {
+			members[jose.HeaderKey(name)] = value
+		}
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.SignatureAlgorithm(algorithm), Key: key},
+		&jose.SignerOptions{ExtraHeaders: members})
 	if err != nil {
 		return "", err
 	}
@@ -201,28 +262,30 @@ func SignPayload(key crypto.Signer, algorithm jose.SignatureAlgorithm, header ma
 func (s *StandIn) keys(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	s.fetches++
-	held, failing, published := s.held, s.failing, s.published
-	answer := s.answer()
+	held := s.held
 	s.mu.Unlock()
 	if held != nil {
 		<-held
 	}
+	s.mu.Lock()
+	failing, answer := s.failing, s.published
+	if answer == nil {
+		answer = s.keySet()
+	}
+	s.mu.Unlock()
 	if failing {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
-	}
-	if published != nil {
-		answer = published
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(answer)
 }
 
-// answer is the published set; s.mu is held.
-func (s *StandIn) answer() []byte {
+// keySet is the published keys as a JWKS; s.mu is held.
+func (s *StandIn) keySet() []byte {
 	set := jose.JSONWebKeySet{}
 	for id, key := range s.signers {
-		set.Keys = append(set.Keys, jose.JSONWebKey{Key: &key.PublicKey, KeyID: id, Algorithm: "ES256", Use: "sig"})
+		set.Keys = append(set.Keys, jose.JSONWebKey{Key: &key.PublicKey, KeyID: id, Algorithm: string(jose.ES256), Use: "sig"})
 	}
 	answer, err := json.Marshal(set)
 	if err != nil {

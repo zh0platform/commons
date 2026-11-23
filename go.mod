@@ -2,7 +2,10 @@ module git.kloudbox.de/commons/commons
 
 go 1.27
 
-require github.com/jackc/pgx/v5 v5.13.0
+require (
+	github.com/go-jose/go-jose/v4 v4.1.9
+	github.com/jackc/pgx/v5 v5.13.0
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
