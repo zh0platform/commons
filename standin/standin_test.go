@@ -111,8 +111,23 @@ func TestStandInServesAnAccessTokenUser(t *testing.T) {
 			s.Rotate()
 			second := s.Token(t, typed, nil)
 			_, set := fetch(t, client, keys)
-			if _, ok := verified(t, set, second); !ok {
-				t.Fatal("a token of the rotated key does not verify against the set fetched after the rotation")
+			claims, ok := verified(t, set, second)
+			if !ok || protectedHeader(t, second)["kid"] == protectedHeader(t, first)["kid"] {
+				t.Fatal("a token of the rotated key does not verify against the set fetched after the rotation, under a new key ID")
+			}
+			exp, expOK := claims["exp"].(float64)
+			iat, iatOK := claims["iat"].(float64)
+			if !expOK || !iatOK || exp != iat+300 {
+				t.Fatalf("Claims exp = %v, iat %v, want a lifetime of 300 s", claims["exp"], claims["iat"])
+			}
+			var served jose.JSONWebKeySet
+			if err := json.Unmarshal(set, &served); err != nil || len(served.Keys) != 2 {
+				t.Fatalf("key set = %s, %v, want both keys", set, err)
+			}
+			for _, key := range served.Keys {
+				if !key.IsPublic() {
+					t.Fatalf("the key set publishes a private key (%s)", key.KeyID)
+				}
 			}
 			if _, ok := verified(t, set, first); !ok || !s.Signed(first) {
 				t.Fatal("a token of the earlier key no longer verifies after a rotation")
@@ -162,6 +177,10 @@ func TestTokenHeaderIsTheCallersHeader(t *testing.T) {
 		return standin.SignPayload(own, "ES256", header, []byte(`{}`))
 	}
 	standInKey := func(header map[string]any) (string, error) { return s.Mint(header, []byte(`{}`)) }
+	claimsOwnKey := func(header map[string]any) (string, error) {
+		return standin.Sign(own, "ES256", header, map[string]any{})
+	}
+	token := func(header map[string]any) (string, error) { return s.Token(t, header, nil), nil }
 	for name, c := range map[string]struct {
 		sign         func(map[string]any) (string, error)
 		header, want map[string]any
@@ -174,6 +193,8 @@ func TestTokenHeaderIsTheCallersHeader(t *testing.T) {
 		"stand-in, typed":    {standInKey, map[string]any{"typ": "at+jwt"}, map[string]any{"alg": "ES256", "kid": current, "typ": "at+jwt"}},
 		"stand-in, alg, kid": {standInKey, map[string]any{"alg": "none", "kid": "other"}, map[string]any{"alg": "ES256", "kid": current}},
 		"stand-in, untyped":  {standInKey, map[string]any{}, map[string]any{"alg": "ES256", "kid": current}},
+		"Sign, claims":       {claimsOwnKey, map[string]any{"kid": "k"}, map[string]any{"alg": "ES256", "kid": "k"}},
+		"Token, logout":      {token, map[string]any{"typ": "logout+jwt"}, map[string]any{"alg": "ES256", "kid": current, "typ": "logout+jwt"}},
 	} {
 		before := maps.Clone(c.header)
 		token, err := c.sign(c.header)
@@ -280,6 +301,9 @@ func TestNewRefusesWhatItCannotServe(t *testing.T) {
 		"a user":                {"keycloak", "https://u@idp.example/realms/x"},
 		"a query":               {"keycloak", "https://idp.example/realms/x?q=1"},
 		"a fragment":            {"auth0", "https://idp.example/#f"},
+		"an empty query":        {"keycloak", "https://idp.example/realms/x?"},
+		"an empty fragment":     {"keycloak", "https://idp.example/realms/x#"},
+		"a port without a host": {"keycloak", "https://:443/realms/x"},
 		"keycloak with a slash": {"keycloak", "https://idp.example/realms/x/"},
 		"auth0 without a slash": {"auth0", "https://idp.example"},
 	} {

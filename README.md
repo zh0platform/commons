@@ -109,8 +109,9 @@ CI on a candidate tag (`vX.Y.Z-rc.N`) before the release tag goes on the same co
   `testdb/testdb_database_test.go::TestPlaintextAdmitsOnlyTheListedLogins`
 - **trust**: Tokens. A stand-in token's protected header is exactly the members its caller stated plus `alg` (and the
   stand-in's key ID when its own key signs), each replacing a caller's member of that name; nothing adds a `typ`, and
-  the caller's header is not changed. The stand-in's private keys never leave it. Tests:
-  `standin/standin_test.go::TestTokenHeaderIsTheCallersHeader`
+  the caller's header is not changed. The stand-in's private keys never leave it: its key set holds public keys only.
+  Tests: `standin/standin_test.go::TestTokenHeaderIsTheCallersHeader`,
+  `standin/standin_test.go::TestStandInServesAnAccessTokenUser`
 - **cleanup**: Tests. A test database and a relay end with the test that made them: the database is dropped and every
   connection the relay accepted is closed, also one blocked writing to a server that stopped reading. Tests:
   `testdb/testdb_database_test.go::TestDatabaseAndRelayEndWithTheirTest`,

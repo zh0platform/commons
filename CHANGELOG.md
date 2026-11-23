@@ -7,13 +7,14 @@ version, noted here for its users.
 
 Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.2):
 
-- `withdb`: `Start` and the stack's `Published`, `Run` and `Close` are gone. A runner `main` parses its flags and exits
+- `withdb`: `Start`, the type `Stack` and its `Published`, `Run` and `Close` are gone. A runner `main` parses its flags and exits
   with `withdb.Run(product, command)`, which prints its errors (each line after `withdb: `) and answers the exit
   status by the same rule as before; an empty command is refused before the stack comes up.
 - `testdb`: `ClosedPort`, `Authority` (with its methods `PEM` and `ServerCertificate`) and `NewAuthority` moved, unchanged,
   to the new package `nettest`.
 - `withdb`: `<prefix>DEVTOOLS` is no longer inherited by any run; with `Product.Browser` the service name `chrome`
   belongs to the module, and a product file's `chrome` block merges into it (give flags as its `command` list only).
+- `keycloak`: a `Realm` client holds its `RedirectURIs` slice, so two client values no longer compare with `==`.
 
 Additive:
 

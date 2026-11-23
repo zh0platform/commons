@@ -33,7 +33,8 @@ var prefix = selftest.Product("/").Project
 func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 	runner := buildRunner(t)
 	temp := t.TempDir() // every run's folder lives here, so the test sees exactly its own
-	beside := start(t, runner, temp, nil, "--", "sh", "-c", "echo ready; exec sleep 600")
+	// It outlives every case (runBound each), and ends only by the test's signal.
+	beside := start(t, runner, temp, nil, "--", "sh", "-c", "echo ready; exec sleep 3600")
 	beside.waitFor(t, "ready")
 
 	t.Run("each boundary", func(t *testing.T) { // returns once its parallel cases ended

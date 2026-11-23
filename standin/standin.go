@@ -55,7 +55,8 @@ type StandIn struct {
 // profile's form. It starts no server.
 func New(profile, issuer string, mux *http.ServeMux) (*StandIn, error) {
 	u, err := url.Parse(issuer)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
+		strings.Contains(issuer, "#") {
 		return nil, fmt.Errorf("stand-in issuer %q: want https with a host and no user, query or fragment", issuer)
 	}
 	form, known := profiles[profile]
@@ -140,15 +141,12 @@ func (s *StandIn) Hold(t testing.TB) (release func()) {
 	}
 	s.held = held
 	s.mu.Unlock()
-	var once sync.Once
-	release = func() {
-		once.Do(func() {
-			s.mu.Lock()
-			s.held = nil
-			s.mu.Unlock()
-			close(held)
-		})
-	}
+	release = sync.OnceFunc(func() {
+		s.mu.Lock()
+		s.held = nil
+		s.mu.Unlock()
+		close(held)
+	})
 	t.Cleanup(release)
 	return release
 }
