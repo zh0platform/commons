@@ -3,6 +3,11 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
+## Unreleased
+
+- `withdb`: provisioning has a bound of its own instead of what is left of the start's, so an expired one is named
+  truthfully. A test pins the relay's cleanup against a server that stopped reading.
+
 ## v0.1.1
 
 Fixes, no change to an exported name:

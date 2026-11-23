@@ -99,4 +99,6 @@ CI on a candidate tag (`vX.Y.Z-rc.N`) before the release tag goes on the same co
 - **trust**: Secrets. The login password and the server key are in no host file the module writes, in none of its
   output, and in no server log line from provisioning, whatever logging flags a product gives the server. Tests: `withdb/stack_test.go::failed start, statements logged`
 - **cleanup**: Tests. A test database and a relay end with the test that made them: the database is dropped and every
-  connection the relay accepted is closed. Tests: `testdb/testdb_database_test.go::TestDatabaseAndRelayEndWithTheirTest`
+  connection the relay accepted is closed, also one blocked writing to a server that stopped reading. Tests:
+  `testdb/testdb_database_test.go::TestDatabaseAndRelayEndWithTheirTest`,
+  `testdb/forwarder_test.go::TestRelayToAServerThatStoppedReadingEndsWithItsTest`

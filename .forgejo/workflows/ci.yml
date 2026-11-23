@@ -17,8 +17,9 @@ env:
 jobs:
   qa:
     runs-on: oracle-arm64-host
-    # Measured 2026-11-23 on the Ampere: 69 s warm (Keycloak healthy in 36 s, stack test 14 s). A cold pull of both
-    # images adds about a minute (withdb's startBound), a failed start's teardown seconds: 30 leaves wide margin.
+    # Measured 2026-11-23 on the Ampere: 69 s warm, 87 s with the final stack test (Keycloak healthy in 36 s). A cold
+    # pull and a cold Keycloak add about 3 minutes (estimated from the Mac's download, withdb's startBound), a failed
+    # start's teardown seconds: 30 leaves wide margin.
     timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

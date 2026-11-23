@@ -156,7 +156,8 @@ func (s *Stack) start() error {
 		return s.setupError("reading a port", callBound, err)
 	}
 	server.Host, server.Port = host, port
-	provisionCtx, cancelProvision := context.WithTimeout(ctx, provisionBound)
+	// A bound of its own, not what is left of the start's, so an expired one is named truthfully.
+	provisionCtx, cancelProvision := context.WithTimeout(s.stop, provisionBound)
 	defer cancelProvision()
 	if err := testdb.Provision(provisionCtx, s.product, server); err != nil {
 		return s.setupError("provisioning", provisionBound, err)
