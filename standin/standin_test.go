@@ -180,7 +180,7 @@ func TestTokenHeaderIsTheCallersHeader(t *testing.T) {
 	claimsOwnKey := func(header map[string]any) (string, error) {
 		return standin.Sign(own, "ES256", header, map[string]any{})
 	}
-	token := func(header map[string]any) (string, error) { return s.Token(t, header, nil), nil }
+	tokenWithHeader := func(header map[string]any) (string, error) { return s.Token(t, header, nil), nil }
 	for name, c := range map[string]struct {
 		sign         func(map[string]any) (string, error)
 		header, want map[string]any
@@ -194,7 +194,7 @@ func TestTokenHeaderIsTheCallersHeader(t *testing.T) {
 		"stand-in, alg, kid": {standInKey, map[string]any{"alg": "none", "kid": "other"}, map[string]any{"alg": "ES256", "kid": current}},
 		"stand-in, untyped":  {standInKey, map[string]any{}, map[string]any{"alg": "ES256", "kid": current}},
 		"Sign, claims":       {claimsOwnKey, map[string]any{"kid": "k"}, map[string]any{"alg": "ES256", "kid": "k"}},
-		"Token, logout":      {token, map[string]any{"typ": "logout+jwt"}, map[string]any{"alg": "ES256", "kid": current, "typ": "logout+jwt"}},
+		"Token, logout":      {tokenWithHeader, map[string]any{"typ": "logout+jwt"}, map[string]any{"alg": "ES256", "kid": current, "typ": "logout+jwt"}},
 	} {
 		before := maps.Clone(c.header)
 		token, err := c.sign(c.header)
@@ -304,6 +304,7 @@ func TestNewRefusesWhatItCannotServe(t *testing.T) {
 		"an empty query":        {"keycloak", "https://idp.example/realms/x?"},
 		"an empty fragment":     {"keycloak", "https://idp.example/realms/x#"},
 		"a port without a host": {"keycloak", "https://:443/realms/x"},
+		"an escaped slash":      {"keycloak", "https://idp.example/realms/a%2Fb"},
 		"keycloak with a slash": {"keycloak", "https://idp.example/realms/x/"},
 		"auth0 without a slash": {"auth0", "https://idp.example"},
 	} {

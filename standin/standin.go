@@ -50,14 +50,15 @@ type StandIn struct {
 
 // New makes a stand-in of profile ("keycloak" or "auth0") for issuer with one key and serves its key set on mux at
 // the profile's path under the issuer's path: "<path>/protocol/openid-connect/certs" for keycloak, whose issuer does
-// not end in a slash, and "<path>.well-known/jwks.json" for auth0, whose issuer does. It refuses an unknown profile,
-// an issuer that is not https with a host or that carries a user, a query or a fragment, and an issuer in the other
-// profile's form. It starts no server.
+// not end in a slash, and "<path>.well-known/jwks.json" for auth0, whose issuer does. It refuses an unknown profile;
+// an issuer that is not https with a host name, that carries a user, a query or a fragment (even an empty "?" or "#"),
+// or an escaped path segment (the mux would serve the decoded path); and an issuer in the other profile's form. It
+// starts no server.
 func New(profile, issuer string, mux *http.ServeMux) (*StandIn, error) {
 	u, err := url.Parse(issuer)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
-		strings.Contains(issuer, "#") {
-		return nil, fmt.Errorf("stand-in issuer %q: want https with a host and no user, query or fragment", issuer)
+		strings.Contains(issuer, "#") || u.RawPath != "" {
+		return nil, fmt.Errorf("stand-in issuer %q: want https with a host name and no user, query, fragment or escaped path", issuer)
 	}
 	form, known := profiles[profile]
 	switch {

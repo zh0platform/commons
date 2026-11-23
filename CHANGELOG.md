@@ -7,7 +7,7 @@ version, noted here for its users.
 
 Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.2):
 
-- `withdb`: `Start`, the type `Stack` and its `Published`, `Run` and `Close` are gone. A runner `main` parses its flags and exits
+- `withdb`: `Start` and the type `Stack` with its methods `Published`, `Run` and `Close` are gone. A runner `main` parses its flags and exits
   with `withdb.Run(product, command)`, which prints its errors (each line after `withdb: `) and answers the exit
   status by the same rule as before; an empty command is refused before the stack comes up.
 - `testdb`: `ClosedPort`, `Authority` (with its methods `PEM` and `ServerCertificate`) and `NewAuthority` moved, unchanged,
