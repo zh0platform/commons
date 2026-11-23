@@ -1,0 +1,45 @@
+# A Keycloak for tests, generic: it names nothing of the project using it. It serves HTTPS only with the certificate
+# and key in BFF_TEST_SERVER_CERT and BFF_TEST_SERVER_KEY, imports every realm file of the folder KEYCLOAK_REALMS (an
+# absolute path: with several Compose files a relative one would follow the first file) at start and reads the
+# password deny lists a realm's policy names from the same folder, takes its hostname from each request (development
+# mode), and is ready when its health endpoint says so. Its bootstrap administrator (test-only credentials) drives the
+# admin REST API where a suite needs Keycloak to act on its own (a user disabled or signed out by an administrator), and
+# reads a realm back by hand.
+services:
+  keycloak:
+    # Docker Hub, not quay.io: only Docker Hub gives Renovate the release dates its 7-day wait needs.
+    image: keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    environment:
+      BFF_TEST_SERVER_CERT: ${BFF_TEST_SERVER_CERT:?}
+      BFF_TEST_SERVER_KEY: ${BFF_TEST_SERVER_KEY:?}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_SCHEME: http # the health check inside the container speaks plain HTTP
+      JAVA_OPTS_KC_HEAP: -Xms256m -Xmx512m
+      # No DNS cache: a suite recreates the services Keycloak calls back (a back-channel logout URL names one), and a
+      # cached address would then reach the wrong service or none.
+      JAVA_OPTS_APPEND: -Dsun.net.inetaddr.ttl=0 -Dsun.net.inetaddr.negative.ttl=0
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: test-only-admin
+    entrypoint:
+      - bash
+      - -ec
+      - |
+        printf '%s' "$$BFF_TEST_SERVER_CERT" > /tmp/server.crt
+        printf '%s' "$$BFF_TEST_SERVER_KEY" > /tmp/server.key
+        exec /opt/keycloak/bin/kc.sh start-dev --import-realm --http-enabled=false --https-port=8443 \
+          --https-certificate-file=/tmp/server.crt --https-certificate-key-file=/tmp/server.key \
+          --spi-password-policy--password-blacklist--blacklists-path=/opt/keycloak/data/import
+    volumes:
+      - ${KEYCLOAK_REALMS:?}:/opt/keycloak/data/import:ro
+    networks:
+      default:
+        aliases: [idp.test]
+    ports:
+      - "127.0.0.1::8443"
+    mem_limit: 1g
+    cpus: 2
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && read -r status <&3 && [[ $$status == 'HTTP/1.'[01]' 200 '* ]]"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
