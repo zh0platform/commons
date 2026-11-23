@@ -32,7 +32,7 @@ func TestInheritedDropsRunnerSettingsComposeAndRefusedVariables(t *testing.T) {
 	product := selftest.Product(t.TempDir())
 	for _, name := range []string{
 		"AGENTTEST_DB_HOST", "AGENTTEST_SERVER_KEY", "AGENTTEST_ROOT", "KEYCLOAK_TEST_URL", "KEYCLOAK_REALMS",
-		"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "AGENT_TYPO",
+		"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "AGENT_TYPO", "AGENTTEST_DEVTOOLS",
 	} {
 		t.Setenv(name, "another-run")
 	}

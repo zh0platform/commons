@@ -1,19 +1,21 @@
-// Package withdb starts one run's test stack, a PostgreSQL server of its own and, if the product asks, a Keycloak, as
-// a Compose project, and runs a command against it. A product's runner program is a few lines around it:
+// Package withdb starts one run's test stack, a PostgreSQL server of its own and, if the product asks, a Keycloak and
+// a Chromium, as a Compose project, and runs a command against it. A product's runner program parses its own flags
+// into a testdb.Product and exits with Run's status:
 //
-//	stack, err := withdb.Start(product) // exit 1 on an error
-//	status, err := stack.Run(command)   // after any further step, such as Published
-//	err = stack.Close()                 // on every path once Start answered a stack
+//	os.Exit(withdb.Run(product, command))
 //
-// The runner exits 2 for its own usage error, 1 when Start or a step before the command fails or the command could
-// not run, otherwise with the command's status, raised to at least 1 when Close fails. Each run removes its project and
-// its folder on every exit it makes itself; a run killed hard is named, with the commands that remove it, by the next
-// start of the same product on the same machine. A run never removes what another run started. One stack per process.
+// The runner exits 2 for its own usage error; Run answers 1 when the description, the start or a step before the
+// command fails, when a signal came before the command, or when the command could not start, otherwise the command's
+// status, raised to at least 1 when the removal fails. Each run removes its project and its folder on every exit it
+// makes itself; a run killed hard is named, with the commands that remove it, by the next start of the same product on
+// the same machine. A run never removes what another run started. One run per process.
 //
 // With P the product's Variables, Compose and the product's own Compose files read P+ADMIN_PASSWORD, P+SERVER_CERT,
 // P+SERVER_KEY, P+SERVER_SPKI (the server key's pin, as Chromium takes it), P+PG_HBA, P+ROOT (the product's Root) and,
 // with Keycloak, KEYCLOAK_REALMS. The command gets P+DB_HOST, P+DB_PORT, P+DB_CA, P+DB_ADMIN_PASSWORD and
-// P+DB_LOGIN_PASSWORD; with Keycloak, KEYCLOAK_TEST_URL and KEYCLOAK_TEST_CA; when the product gives Compose files, also
+// P+DB_LOGIN_PASSWORD; with Keycloak, KEYCLOAK_TEST_URL and KEYCLOAK_TEST_CA; with the browser, P+DEVTOOLS (the host and
+// port of Chromium's DevTools, the service chrome, port 9222, whose command list a product's file may give as Chromium
+// flags); when the product gives Compose files, also
 // Compose's values, COMPOSE_PROJECT_NAME and COMPOSE_FILE. A product's own Compose file may give the postgres service's
 // environment entry P+PG_FLAGS, which replaces the module's server flags (-c log_connections=receipt,setup_durations),
 // the last -c of a name winning. The server certificate names 127.0.0.1, ::1, host.docker.internal, postgres and
@@ -59,6 +61,8 @@ const (
 	postgresPort    = "5432"
 	keycloakService = "keycloak"
 	keycloakPort    = "8443"
+	chromeService   = "chrome"
+	chromePort      = "9222"
 )
 
 const (
@@ -69,7 +73,8 @@ const (
 	// a minute; with extraction about 3 minutes, so 8 leaves more than twice that. Warm: about 3 s, 36 s with Keycloak.
 	startBound = 8 * time.Minute
 	// healthWait is Compose's own wait for the services' health, inside startBound: a cold Keycloak takes about a
-	// minute to be healthy (36 s warm on the CI host), so 4 minutes.
+	// minute to be healthy (36 s warm on the CI host), so 4 minutes. Both bounds already held bff's browser runs, which
+	// brought up the same Chromium image beside PostgreSQL and Keycloak through a product file.
 	healthWait = "240"
 	// provisionBound covers creating the logins, the template and the schema: under a second measured, a minute for a
 	// loaded host.
@@ -81,11 +86,11 @@ const (
 	callBound = 30 * time.Second
 )
 
-//go:embed postgres.yaml keycloak.yaml
+//go:embed postgres.yaml keycloak.yaml chrome.yaml
 var embedded embed.FS
 
-// Stack is one run's started Compose project.
-type Stack struct {
+// stack is one run's started Compose project.
+type stack struct {
 	product    testdb.Product
 	name       string
 	folder     string
@@ -105,16 +110,46 @@ type Stack struct {
 // errStopped answers a run that a signal stopped before its command.
 var errStopped = errors.New("stopped during setup")
 
-// Start checks the product's description, reports what killed runs of the product left, and brings up the run's
+// Run checks the product's description, brings up its stack, runs command against it with the run's settings, removes
+// the stack and answers the exit status for the product's runner (package documentation). INT and TERM pass to the
+// running command; before it, they stop the start. Each error is printed once, each line after "withdb: ", on standard
+// error.
+func Run(p testdb.Product, command []string) int {
+	if len(command) == 0 {
+		report(errors.New("setup failed: no command to run"))
+		return 1
+	}
+	s, err := startStack(p)
+	if err != nil {
+		report(err)
+		return 1
+	}
+	status, err := s.run(command)
+	if err != nil {
+		report(err)
+	}
+	if err := s.close(); err != nil {
+		report(err)
+		return max(status, 1)
+	}
+	return status
+}
+
+// report prints an error, each of its lines (a start failure joined with a failed removal is two) after "withdb: ".
+func report(err error) {
+	_, _ = fmt.Fprintln(os.Stderr, "withdb: "+strings.ReplaceAll(err.Error(), "\n", "\nwithdb: "))
+}
+
+// startStack checks the product's description, reports what killed runs of the product left, and brings up the run's
 // stack: its folder, authority, server certificate and passwords, the Compose files, the services, healthy, and the
 // provisioned server. It catches INT and TERM from then on. When a step fails or a signal arrives it prints the
 // services' logs (unless the product is quiet), removes what it started and answers the error; nothing is left to
 // close.
-func Start(p testdb.Product) (*Stack, error) {
+func startStack(p testdb.Product) (*stack, error) {
 	if err := p.Check(); err != nil {
 		return nil, fmt.Errorf("setup failed: checking the description: %w", err)
 	}
-	s := &Stack{product: p, name: owner(p) + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(rand.Text()[:8])}
+	s := &stack{product: p, name: owner(p) + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(rand.Text()[:8])}
 	s.folder = filepath.Join(os.TempDir(), s.name)
 	s.base = inherited(p)
 	s.stop, s.stopNow = context.WithCancel(context.Background())
@@ -137,7 +172,7 @@ func Start(p testdb.Product) (*Stack, error) {
 	return s, nil
 }
 
-func (s *Stack) start() error {
+func (s *stack) start() error {
 	server, err := s.writeFiles()
 	if err != nil {
 		return fmt.Errorf("setup failed: %w", err)
@@ -152,7 +187,7 @@ func (s *Stack) start() error {
 	if _, err := s.compose(ctx, up...); err != nil {
 		return s.setupError("bringing up", startBound, err)
 	}
-	host, port, err := s.Published(postgresService, postgresPort)
+	host, port, err := s.published(postgresService, postgresPort)
 	if err != nil {
 		return s.setupError("reading a port", callBound, err)
 	}
@@ -165,12 +200,19 @@ func (s *Stack) start() error {
 	}
 	s.commandEnv = s.product.ServerEnviron(server)
 	if s.product.Realms != "" {
-		host, port, err := s.Published(keycloakService, keycloakPort)
+		host, port, err := s.published(keycloakService, keycloakPort)
 		if err != nil {
 			return s.setupError("reading a port", callBound, err)
 		}
 		s.commandEnv = append(s.commandEnv,
 			keycloak.URLVariable+"=https://"+net.JoinHostPort(host, port), keycloak.CAVariable+"="+server.CA)
+	}
+	if s.product.Browser {
+		host, port, err := s.published(chromeService, chromePort)
+		if err != nil {
+			return s.setupError("reading a port", callBound, err)
+		}
+		s.commandEnv = append(s.commandEnv, s.product.Variables+devTools+"="+net.JoinHostPort(host, port))
 	}
 	if len(s.product.Files) > 0 {
 		// The command addresses the stack with plain docker compose, over the same files in the same order.
@@ -185,7 +227,7 @@ func (s *Stack) start() error {
 }
 
 // setupError names the failed step, or the signal or the step's bound that ended it.
-func (s *Stack) setupError(step string, bound time.Duration, err error) error {
+func (s *stack) setupError(step string, bound time.Duration, err error) error {
 	switch {
 	case s.stop.Err() != nil:
 		return errStopped
@@ -198,7 +240,7 @@ func (s *Stack) setupError(step string, bound time.Duration, err error) error {
 // writeFiles makes the run's secrets and writes the module's Compose files, with the product's prefix, into the run's
 // folder. The secrets reach Compose only through its environment, never a file. It answers the server's authority and
 // passwords; its address comes once it runs.
-func (s *Stack) writeFiles() (testdb.Server, error) {
+func (s *stack) writeFiles() (testdb.Server, error) {
 	p := s.product
 	authority, err := nettest.NewAuthority()
 	if err != nil {
@@ -223,6 +265,9 @@ func (s *Stack) writeFiles() (testdb.Server, error) {
 	if p.Realms != "" {
 		names = append(names, "keycloak.yaml")
 		s.composeEnv = append(s.composeEnv, realmsVariable+"="+p.Realms)
+	}
+	if p.Browser {
+		names = append(names, "chrome.yaml")
 	}
 	for _, name := range names {
 		content, err := embedded.ReadFile(name)
@@ -252,6 +297,7 @@ const (
 	serverPin      = "SERVER_SPKI"
 	pgHBA          = "PG_HBA"
 	root           = "ROOT"
+	devTools       = "DEVTOOLS" // the command's, the address of Chromium's DevTools
 	realmsVariable = "KEYCLOAK_REALMS"
 	// keycloakAlias is Keycloak's name on the stack's network (keycloak.yaml), on the server certificate.
 	keycloakAlias = "idp.test"
@@ -286,8 +332,8 @@ func publicKeyPin(certPEM string) (string, error) {
 	return base64.StdEncoding.EncodeToString(sum[:]), nil
 }
 
-// Published is the loopback host and port Docker chose for a service's container port.
-func (s *Stack) Published(service, port string) (string, string, error) {
+// published is the loopback host and port Docker chose for a service's container port.
+func (s *stack) published(service, port string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(s.stop, callBound)
 	defer cancel()
 	answer, err := s.compose(ctx, "port", service, port)
@@ -301,14 +347,14 @@ func (s *Stack) Published(service, port string) (string, string, error) {
 	return host, published, nil
 }
 
-// Run runs the command with the given NAME=value variables and the run's settings, which win over them and over every
-// inherited variable, and passes every INT and TERM the runner receives on to it. The command's lifetime has no bound
-// of its own: the caller's (a CI job's timeout) applies. It answers the command's status, at least 1 when it did not
-// end with 0; a command skipped by a signal that came first, or one that could not start, is an error with status 1.
-func (s *Stack) Run(command []string, variables ...string) (int, error) {
+// run runs the command with the run's settings, which win over every inherited variable, and passes every INT and
+// TERM the runner receives on to it. The command's lifetime has no bound of its own: the caller's (a CI job's timeout)
+// applies. It answers the command's status, at least 1 when it did not end with 0; a command skipped by a signal that
+// came first, or one that could not start, is an error with status 1.
+func (s *stack) run(command []string) (int, error) {
 	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = slices.Concat(s.base, variables, s.commandEnv)
+	cmd.Env = slices.Concat(s.base, s.commandEnv)
 	s.mu.Lock()
 	if s.stop.Err() != nil {
 		s.mu.Unlock()
@@ -334,17 +380,17 @@ func (s *Stack) Run(command []string, variables ...string) (int, error) {
 	return 0, nil
 }
 
-// Close prints the services' logs unless a command passed or the product is quiet, removes the project with its
+// close prints the services' logs unless a command passed or the product is quiet, removes the project with its
 // volumes, orphans and locally built images, and the run's folder, under a fresh bound, and stops catching signals.
 // It answers an error naming the project and the commands that remove it when the removal fails.
-func (s *Stack) Close() error {
+func (s *stack) close() error {
 	err := s.remove(!s.passed && !s.product.Quiet)
 	s.stopSignals()
 	return err
 }
 
 // remove prints the logs if asked and removes the project and the folder.
-func (s *Stack) remove(withLogs bool) error {
+func (s *stack) remove(withLogs bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), removeBound)
 	defer cancel()
 	if withLogs {
@@ -382,7 +428,7 @@ func quoted(path string) string {
 }
 
 // compose runs one Compose command on the project, from the product's root, in the run's Compose environment.
-func (s *Stack) compose(ctx context.Context, args ...string) ([]byte, error) {
+func (s *stack) compose(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose", "--project-name", s.name}, args...)...)
 	cmd.Dir, cmd.Env, cmd.Stderr = s.product.Root, slices.Concat(s.base, s.composeEnv), os.Stderr
 	output, err := cmd.Output()
@@ -395,7 +441,7 @@ func (s *Stack) compose(ctx context.Context, args ...string) ([]byte, error) {
 
 // watch passes every INT and TERM to the running command; before the command, it marks the run stopped and ends the
 // Compose call in progress.
-func (s *Stack) watch() {
+func (s *stack) watch() {
 	for received := range s.signals {
 		s.mu.Lock()
 		if s.command != nil {
@@ -407,7 +453,7 @@ func (s *Stack) watch() {
 	}
 }
 
-func (s *Stack) stopSignals() {
+func (s *stack) stopSignals() {
 	signal.Stop(s.signals)
 	close(s.signals)
 	s.stopNow()
@@ -418,7 +464,7 @@ func (s *Stack) stopSignals() {
 // at that run's servers.
 func inherited(p testdb.Product) []string {
 	runnerNames := slices.Concat(p.ServerVariables(), []string{keycloak.URLVariable, keycloak.CAVariable, realmsVariable})
-	for _, suffix := range []string{adminPassword, serverCert, serverKey, serverPin, pgHBA, root} {
+	for _, suffix := range []string{adminPassword, serverCert, serverKey, serverPin, pgHBA, root, devTools} {
 		runnerNames = append(runnerNames, p.Variables+suffix)
 	}
 	var kept []string

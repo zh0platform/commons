@@ -25,9 +25,10 @@ fix: check-tools
 unit:
 	$(RUNNER) -- $(GO_TEST) -tags database ./...
 
-# The runner as a real process: it starts runs of its own.
+# The runner as a real process: it starts runs of its own. Its runs may each take 12 minutes on a cold machine
+# (withdb/stack_test.go, runBound), so the test gets 20, inside the CI job's 30.
 stack:
-	$(GO_TEST) -tags stack ./withdb
+	$(GO_TEST) -timeout 20m -tags stack ./withdb
 
 # The module's Keycloak, started once.
 keycloak:

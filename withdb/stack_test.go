@@ -20,6 +20,10 @@ import (
 	"git.kloudbox.de/commons/commons/internal/selftest"
 )
 
+// runBound is how long a run may take to print a line or to end: above the runner's own start bound (8 minutes,
+// cold images), provisioning's minute and the removal's two, so a slow start fails with the runner's bound named.
+const runBound = 12 * time.Minute
+
 // prefix starts the names of the test product's projects and folders.
 var prefix = selftest.Product("/").Project
 
@@ -69,6 +73,10 @@ func cases(t *testing.T, runner, temp string) {
 			signal: func(t *testing.T, r *run) { r.waitFor(t, "ready"); r.signal(t, syscall.SIGTERM) }},
 		{name: "interrupt during the command", args: []string{"--", "sh", "-c", "echo ready; exec sleep 600"}, status: 1,
 			signal: func(t *testing.T, r *run) { r.waitFor(t, "ready"); r.signal(t, syscall.SIGINT) }},
+		// A browser without any product file (the agent's shape): the command gets DevTools' address and no Compose
+		// variable, and DevTools answers through that address at once.
+		{name: "browser without product files", status: 0, args: []string{"--browser", "--", "sh", "-c",
+			`test -z "$COMPOSE_FILE" && test -z "$AGENTTEST_ADMIN_PASSWORD" && curl -fsS --max-time 10 "http://$AGENTTEST_DEVTOOLS/json/version" | grep -q '"Browser"'`}},
 		{name: "failed start, statements logged", status: 1,
 			args: []string{"--compose", statementLog, "--login", "agent_migrate", "--", "true"},
 			output: []string{"setup failed: provisioning", `role "agent_migrate" already exists`,
@@ -100,14 +108,14 @@ func cases(t *testing.T, runner, temp string) {
 	// run's own settings and a setting the runner does not manage do.
 	t.Run("the command's environment", func(t *testing.T) {
 		t.Parallel()
-		inherited := []string{"AGENT_TYPO=1", "AGENTTEST_DB_HOST=another-run", "AGENTTEST_PG_FLAGS=-c fsync=on"}
+		inherited := []string{"AGENT_TYPO=1", "AGENTTEST_DB_HOST=another-run", "AGENTTEST_DEVTOOLS=another-run", "AGENTTEST_PG_FLAGS=-c fsync=on"}
 		r := start(t, runner, temp, inherited, "--", "env")
 		status := r.wait(t)
 		if status != 0 {
 			t.Fatalf("exit %d:\n%s", status, r.output())
 		}
 		environment := strings.Join(r.stdout(t), "\n") + "\n"
-		for _, absent := range []string{"AGENT_TYPO=", "AGENTTEST_DB_HOST=another-run"} {
+		for _, absent := range []string{"AGENT_TYPO=", "AGENTTEST_DB_HOST=another-run", "AGENTTEST_DEVTOOLS="} {
 			if strings.Contains(environment, absent) {
 				t.Errorf("the command's environment holds %s", absent)
 			}
@@ -244,7 +252,7 @@ func (r *run) output() string {
 
 func (r *run) waitFor(t *testing.T, line string) {
 	t.Helper()
-	deadline := time.After(5 * time.Minute) // a cold start pulls the image
+	deadline := time.After(runBound)
 	for {
 		select {
 		case got := <-r.lines:
@@ -254,7 +262,7 @@ func (r *run) waitFor(t *testing.T, line string) {
 		case <-r.done:
 			t.Fatalf("the run ended before %q:\n%s", line, r.output())
 		case <-deadline:
-			t.Fatalf("no %q within 5 minutes:\n%s", line, r.output())
+			t.Fatalf("no %q within %v:\n%s", line, runBound, r.output())
 		}
 	}
 }
@@ -307,8 +315,8 @@ func (r *run) wait(t *testing.T) int {
 	select {
 	case <-r.done:
 		return r.status
-	case <-time.After(5 * time.Minute):
-		t.Fatalf("the run did not end within 5 minutes:\n%s", r.output())
+	case <-time.After(runBound):
+		t.Fatalf("the run did not end within %v:\n%s", runBound, r.output())
 		return 0
 	}
 }

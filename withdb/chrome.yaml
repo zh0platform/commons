@@ -1,0 +1,30 @@
+# A headless Chromium for tests, generic: it names nothing of the project using it. It accepts the run's server
+# certificate by its key's pin (WITHDB_SERVER_SPKI) and checks every other certificate against its own roots. DevTools
+# listens on loopback inside the container whatever address it is given, so socat relays the published port 9222 to it
+# on 9223. A product adds Chromium flags as this service's command list in its own Compose file; each item reaches
+# Chromium as one argument, spaces included. The service is healthy once DevTools answers through the relay.
+services:
+  chrome:
+    image: chromedp/headless-shell:159.0.8154.13@sha256:381353d3530ab9d579d2fe8b9c0f4519c995617f5a71daf6bb649e2d12005bd9
+    environment:
+      WITHDB_SERVER_SPKI: ${WITHDB_SERVER_SPKI:?}
+    entrypoint:
+      - bash
+      - -ec
+      - |
+        socat TCP4-LISTEN:9222,fork TCP4:127.0.0.1:9223 &
+        exec /headless-shell/headless-shell --no-sandbox --use-gl=angle --use-angle=swiftshader \
+          --remote-debugging-address=0.0.0.0 --remote-debugging-port=9223 \
+          --ignore-certificate-errors-spki-list="$$WITHDB_SERVER_SPKI" "$$@"
+      - chrome # the shell's $0, so that every command item is one of "$@"
+    ports:
+      - "127.0.0.1::9222"
+    shm_size: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    healthcheck:
+      # DevTools refuses HTTP/1.0 and checks the Host header.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222 && printf 'GET /json/version HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r status <&3 && [[ $$status == 'HTTP/1.1 200 '* ]]"]
+      interval: 1s
+      timeout: 3s
+      retries: 60

@@ -43,6 +43,7 @@ type Product struct {
 	Root        string                      // absolute folder the product's own Compose files resolve from
 	Realms      string                      // absolute folder of the Keycloak realm files; empty: no Keycloak
 	Files       []string                    // the product's own Compose files, after the module's, relative to Root
+	Browser     bool                        // a Chromium that accepts the server certificate (withdb's service chrome)
 	Quiet       bool                        // a failed run prints no service logs
 }
 

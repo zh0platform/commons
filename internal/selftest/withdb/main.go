@@ -1,4 +1,4 @@
-// Command withdb is the module's own runner: `go run ./internal/selftest/withdb [--keycloak] [--quiet]
+// Command withdb is the module's own runner: `go run ./internal/selftest/withdb [--keycloak] [--browser] [--quiet]
 // [--compose <file>]... [--login <name>]... -- <command> [args...]` runs a command against the test product's stack.
 // --login adds a login, so naming an existing one makes the start fail.
 package main
@@ -14,7 +14,7 @@ import (
 	"git.kloudbox.de/commons/commons/withdb"
 )
 
-const usage = "usage: go run ./internal/selftest/withdb [--keycloak] [--quiet] [--compose <file>]... [--login <name>]... -- <command> [args...]"
+const usage = "usage: go run ./internal/selftest/withdb [--keycloak] [--browser] [--quiet] [--compose <file>]... [--login <name>]... -- <command> [args...]"
 
 func main() {
 	root, err := os.Getwd()
@@ -26,24 +26,7 @@ func main() {
 	if err != nil {
 		fail(2, err)
 	}
-	os.Exit(run(product, command))
-}
-
-func run(product testdb.Product, command []string) int {
-	stack, err := withdb.Start(product)
-	if err != nil {
-		report(err)
-		return 1
-	}
-	status, runErr := stack.Run(command)
-	if runErr != nil {
-		report(runErr)
-	}
-	if err := stack.Close(); err != nil {
-		report(err)
-		return max(status, 1)
-	}
-	return status
+	os.Exit(withdb.Run(product, command))
 }
 
 func parseArgs(args []string, product *testdb.Product) ([]string, error) {
@@ -51,6 +34,8 @@ func parseArgs(args []string, product *testdb.Product) ([]string, error) {
 		switch {
 		case args[0] == "--keycloak":
 			product.Realms = filepath.Join(product.Root, "internal/selftest/realms")
+		case args[0] == "--browser":
+			product.Browser = true
 		case args[0] == "--quiet":
 			product.Quiet = true
 		case args[0] == "--compose" && len(args) > 1:
@@ -69,9 +54,7 @@ func parseArgs(args []string, product *testdb.Product) ([]string, error) {
 	return nil, errors.New(usage)
 }
 
-func report(err error) { _, _ = fmt.Fprintln(os.Stderr, "withdb:", err) }
-
 func fail(code int, err error) {
-	report(err)
+	_, _ = fmt.Fprintln(os.Stderr, "withdb:", err)
 	os.Exit(code)
 }
