@@ -14,7 +14,10 @@
 // P+SERVER_KEY, P+SERVER_SPKI (the server key's pin, as Chromium takes it), P+PG_HBA, P+ROOT (the product's Root) and,
 // with Keycloak, KEYCLOAK_REALMS. The command gets P+DB_HOST, P+DB_PORT, P+DB_CA, P+DB_ADMIN_PASSWORD and
 // P+DB_LOGIN_PASSWORD; with Keycloak, KEYCLOAK_TEST_URL and KEYCLOAK_TEST_CA; when the product gives Compose files, also
-// Compose's values, COMPOSE_PROJECT_NAME and COMPOSE_FILE. Every process the runner starts gets the inherited
+// Compose's values, COMPOSE_PROJECT_NAME and COMPOSE_FILE. A product's own Compose file may give the postgres service's
+// environment entry P+PG_FLAGS, which replaces the module's server flags (-c log_connections=receipt,setup_durations),
+// the last -c of a name winning. The server certificate names 127.0.0.1, ::1, host.docker.internal, postgres and
+// idp.test, the product's Names, and never localhost. Every process the runner starts gets the inherited
 // environment without the variables the product refuses, without every COMPOSE_* variable and without every name
 // above, so a shell that ran or exported another run's settings cannot point this run at that run's servers.
 package withdb

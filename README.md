@@ -30,8 +30,10 @@ with the same `Product`. `internal/selftest` is a complete example: the module's
 parameters.
 
 The services are `postgres` (container port 5432) and, with a realm folder, `keycloak` (8443, network alias
-`idp.test`), both on ephemeral loopback ports. The variables handed to the command and to Compose are listed in the
-`withdb` documentation; they carry the product's prefix.
+`idp.test`), both on ephemeral loopback ports. The server certificate names `127.0.0.1`, `::1`, `host.docker.internal`,
+`postgres`, `idp.test` and the product's `Names`, never `localhost`. The variables handed to the command and to Compose,
+and the server-flag variable a product's own Compose file may set (`<prefix>PG_FLAGS`), are listed in the `withdb`
+documentation; they carry the product's prefix.
 
 ## Development
 
@@ -57,8 +59,18 @@ first (`go mod download`), then mount the Mac's module download cache read-only 
 for example `-v "$(go env GOMODCACHE)/cache/download:/proxy:ro" -e GOPROXY=file:///proxy -e GOFLAGS=-mod=readonly`.
 `go.sum` verifies the module; no `GOPRIVATE` inside the container.
 
-**A product's CI** sets `GOPRIVATE=git.kloudbox.de/commons/*` and fetches the module in one step with a short-lived
-token as a git header for `https://git.kloudbox.de/commons/commons.git` (see bff's workflows).
+**A product's CI** sets `GOPRIVATE=git.kloudbox.de/commons/*` in its Makefile and in each job, and fetches the module in
+one step before anything compiles, with no stored secret:
+
+1. The owner creates, for the product's repository, a Forgejo "authorized integration" (Settings, Authorized
+   Integrations, type Forgejo Actions (Local)): source repository the product's, capability `repository: Read` on
+   `Commons/commons` only. Its audience is not a secret.
+2. The workflow sets `enable-openid-connect: true`. The step first runs `go mod download git.kloudbox.de/commons/commons`
+   without a credential (a warm module cache answers); on a miss it fetches the job's token
+   (`$ACTIONS_ID_TOKEN_REQUEST_URL&audience=<audience>` with `Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN`)
+   and repeats the download with `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.https://git.kloudbox.de/commons/commons.git.extraheader`
+   and `GIT_CONFIG_VALUE_0="Authorization: Bearer <token>"` in that command's environment only. The key ends in `.git`:
+   git matches a URL prefix at slash boundaries. bff's `scripts/fetch-commons.sh` is a complete example.
 
 **Leftovers of killed runs.** A run killed hard (SIGKILL, a cancelled CI job) leaves its project and folder; the next
 start of the same product on the same machine prints, for each, a line with the commands that remove it, such as
