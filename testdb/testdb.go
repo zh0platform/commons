@@ -301,7 +301,8 @@ func (d *Database) RestoreLikeInfra(t testing.TB, logins ...string) *Database {
 			t.Fatalf("restore: %v", err)
 		}
 	}
-	if _, err := conn.Exec(ctx, "COPY (SELECT 1) TO PROGRAM 'rm -f "+dump+"'"); err != nil {
+	// The program reads the copied row first: rm alone can exit before the server writes it, a broken pipe.
+	if _, err := conn.Exec(ctx, "COPY (SELECT 1) TO PROGRAM 'cat >/dev/null; rm -f "+dump+"'"); err != nil {
 		t.Fatalf("remove the dump: %v", err)
 	}
 	return target
