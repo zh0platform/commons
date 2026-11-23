@@ -62,11 +62,17 @@ func cases(t *testing.T, runner, temp string) {
 		{name: "interrupt during start", args: []string{"--", "true"}, status: 1,
 			signal: func(t *testing.T, r *run) { r.waitForFolder(t); r.signal(t, syscall.SIGINT) },
 			output: []string{"stopped during setup"}},
+		{name: "terminate during start", args: []string{"--", "true"}, status: 1,
+			signal: func(t *testing.T, r *run) { r.waitForFolder(t); r.signal(t, syscall.SIGTERM) },
+			output: []string{"stopped during setup"}},
 		{name: "terminate during the command", args: []string{"--", "sh", "-c", "echo ready; exec sleep 600"}, status: 1,
 			signal: func(t *testing.T, r *run) { r.waitFor(t, "ready"); r.signal(t, syscall.SIGTERM) }},
+		{name: "interrupt during the command", args: []string{"--", "sh", "-c", "echo ready; exec sleep 600"}, status: 1,
+			signal: func(t *testing.T, r *run) { r.waitFor(t, "ready"); r.signal(t, syscall.SIGINT) }},
 		{name: "failed start, statements logged", status: 1,
-			args:   []string{"--compose", statementLog, "--login", "agent_migrate", "--", "true"},
-			output: []string{"setup failed: provisioning", `role "agent_migrate" already exists`}},
+			args: []string{"--compose", statementLog, "--login", "agent_migrate", "--", "true"},
+			output: []string{"setup failed: provisioning", `role "agent_migrate" already exists`,
+				"database system is ready to accept connections"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -118,7 +124,7 @@ func cases(t *testing.T, runner, temp string) {
 		t.Parallel()
 		killed := start(t, runner, temp, nil, "--", "sh", "-c", "echo ready; exec sleep 600")
 		killed.waitFor(t, "ready")
-		project := killed.project(t)
+		project, folder := killed.project(t), killed.folder()
 		killed.removeAfter(t)
 		killed.signal(t, syscall.SIGKILL)
 		_ = killed.wait(t)
@@ -127,11 +133,11 @@ func cases(t *testing.T, runner, temp string) {
 			t.Fatalf("the next run: exit %d:\n%s", status, next.output())
 		}
 		want := project + " is left from a run that ended without its cleanup; remove it with: docker compose -p " + project
-		if !strings.Contains(next.output(), want) {
-			t.Errorf("the next start does not name the killed run's project:\n%s", next.output())
+		if !strings.Contains(next.output(), want) || !strings.Contains(next.output(), "rm -rf '"+folder+"'") {
+			t.Errorf("the next start does not name the killed run's project and folder:\n%s", next.output())
 		}
-		if !listed(t, project) {
-			t.Errorf("the next start removed %s, which it did not start", project)
+		if _, err := os.Stat(folder); !listed(t, project) || err != nil {
+			t.Errorf("the next start removed %s or its folder (%v), which it did not start", project, err)
 		}
 	})
 }
@@ -307,14 +313,21 @@ func (r *run) wait(t *testing.T) int {
 	}
 }
 
-// removeAfter removes the run's project and folder, left behind on purpose, when the test ends.
+// removeAfter removes the run's project and folder, left behind on purpose, when the test ends; a failed removal
+// fails the test and keeps the folder, which names the project.
 func (r *run) removeAfter(t *testing.T) {
 	folder := r.folder()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "docker", "compose", "-p", filepath.Base(folder), "down", "--volumes", "--remove-orphans", "--rmi", "local").Run()
-		_ = os.RemoveAll(folder)
+		down := exec.CommandContext(ctx, "docker", "compose", "-p", filepath.Base(folder), "down", "--volumes", "--remove-orphans", "--rmi", "local")
+		if output, err := down.CombinedOutput(); err != nil {
+			t.Errorf("remove the killed run's project %s: %v\n%s", filepath.Base(folder), err, output)
+			return
+		}
+		if err := os.RemoveAll(folder); err != nil {
+			t.Errorf("remove the killed run's folder: %v", err)
+		}
 	})
 }
 

@@ -63,15 +63,20 @@ const (
 const (
 	// placeholder starts every variable the embedded Compose files read; the product's Variables replace it.
 	placeholder = "WITHDB_"
-	// startBound covers bringing the services up, including pulling their images on a cold machine.
+	// startBound covers bringing the services up on a cold machine. Measured 2026-11-23: downloading the arm64 images
+	// takes 35 s (Keycloak, 264 MB) and 28 s (PostgreSQL, 167 MB) one layer after another, a cold Keycloak start about
+	// a minute; with extraction about 3 minutes, so 8 leaves more than twice that. Warm: about 3 s, 36 s with Keycloak.
 	startBound = 8 * time.Minute
-	// healthWait is Compose's own wait for the services' health; a cold Keycloak takes about a minute.
+	// healthWait is Compose's own wait for the services' health, inside startBound: a cold Keycloak takes about a
+	// minute to be healthy (36 s warm on the CI host), so 4 minutes.
 	healthWait = "240"
-	// provisionBound covers creating the logins, the template and the schema.
+	// provisionBound covers creating the logins, the template and the schema: under a second measured, a minute for a
+	// loaded host.
 	provisionBound = time.Minute
-	// removeBound is the fresh bound of the removal, whatever ended the run.
+	// removeBound is the fresh bound of the removal, whatever ended the run: removing a project measured 2 to 3 s,
+	// with the browser stack's built images under 10 s; 2 minutes for a loaded daemon.
 	removeBound = 2 * time.Minute
-	// callBound covers a Compose call that only reads (port, ls, logs).
+	// callBound covers a Compose call that only reads (port, ls, logs): measured well under a second.
 	callBound = 30 * time.Second
 )
 
@@ -115,7 +120,12 @@ func Start(p testdb.Product) (*Stack, error) {
 	s.signals = make(chan os.Signal, 1)
 	signal.Notify(s.signals, os.Interrupt, syscall.SIGTERM)
 	go s.watch()
-	reportLeftovers(p)
+	reportLeftovers(s.stop, p, s.base)
+	// The folder is this run's only once it made it: a failure here leaves nothing to remove, and nothing is removed.
+	if err := os.Mkdir(s.folder, 0o700); err != nil {
+		s.stopSignals()
+		return nil, fmt.Errorf("setup failed: %w", err)
+	}
 	if err := s.start(); err != nil {
 		if removeErr := s.remove(!p.Quiet); removeErr != nil {
 			err = errors.Join(err, removeErr)
@@ -127,9 +137,6 @@ func Start(p testdb.Product) (*Stack, error) {
 }
 
 func (s *Stack) start() error {
-	if err := os.Mkdir(s.folder, 0o700); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
-	}
 	server, err := s.writeFiles()
 	if err != nil {
 		return fmt.Errorf("setup failed: %w", err)
@@ -142,23 +149,23 @@ func (s *Stack) start() error {
 	}
 	up = append(up, "up", "--detach", "--wait", "--wait-timeout", healthWait)
 	if _, err := s.compose(ctx, up...); err != nil {
-		return s.setupError("bringing up", ctx, err)
+		return s.setupError("bringing up", startBound, err)
 	}
 	host, port, err := s.Published(postgresService, postgresPort)
 	if err != nil {
-		return s.setupError("reading a port", ctx, err)
+		return s.setupError("reading a port", callBound, err)
 	}
 	server.Host, server.Port = host, port
 	provisionCtx, cancelProvision := context.WithTimeout(ctx, provisionBound)
 	defer cancelProvision()
 	if err := testdb.Provision(provisionCtx, s.product, server); err != nil {
-		return s.setupError("provisioning", ctx, err)
+		return s.setupError("provisioning", provisionBound, err)
 	}
 	s.commandEnv = s.product.ServerEnviron(server)
 	if s.product.Realms != "" {
 		host, port, err := s.Published(keycloakService, keycloakPort)
 		if err != nil {
-			return s.setupError("reading a port", ctx, err)
+			return s.setupError("reading a port", callBound, err)
 		}
 		s.commandEnv = append(s.commandEnv,
 			keycloak.URLVariable+"=https://"+net.JoinHostPort(host, port), keycloak.CAVariable+"="+server.CA)
@@ -175,13 +182,13 @@ func (s *Stack) start() error {
 	return nil
 }
 
-// setupError names the failed step, or the signal or bound that ended it.
-func (s *Stack) setupError(step string, ctx context.Context, err error) error {
+// setupError names the failed step, or the signal or the step's bound that ended it.
+func (s *Stack) setupError(step string, bound time.Duration, err error) error {
 	switch {
 	case s.stop.Err() != nil:
 		return errStopped
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return fmt.Errorf("setup failed: %s: no answer within %v: %w", step, startBound, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("setup failed: %s: no answer within %v: %w", step, bound, err)
 	}
 	return fmt.Errorf("setup failed: %s: %w", step, err)
 }
@@ -371,7 +378,12 @@ func quoted(path string) string {
 func (s *Stack) compose(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose", "--project-name", s.name}, args...)...)
 	cmd.Dir, cmd.Env, cmd.Stderr = s.product.Root, slices.Concat(s.base, s.composeEnv), os.Stderr
-	return cmd.Output()
+	output, err := cmd.Output()
+	if err != nil && ctx.Err() != nil {
+		// A process the context killed reports only "signal: killed": the context says why.
+		err = fmt.Errorf("%w (%w)", err, ctx.Err())
+	}
+	return output, err
 }
 
 // watch passes every INT and TERM to the running command; before the command, it marks the run stopped and ends the
@@ -428,12 +440,14 @@ func owner(p testdb.Product) string {
 // A failed listing is not fatal: the run's own Compose calls meet a Docker that does not answer. It sees only the
 // projects of the Docker daemon it reaches and the folders under this process's temporary folder;
 // Docker objects made before a run's first container are not listed by Compose.
-func reportLeftovers(p testdb.Product) {
+func reportLeftovers(stop context.Context, p testdb.Product, environ []string) {
 	prefix := owner(p)
 	projects, folders := map[string]bool{}, map[string]bool{}
-	ctx, cancel := context.WithTimeout(context.Background(), callBound)
+	ctx, cancel := context.WithTimeout(stop, callBound)
 	defer cancel()
-	if listed, err := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json").Output(); err == nil {
+	list := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json")
+	list.Env = environ
+	if listed, err := list.Output(); err == nil {
 		var found []struct{ Name string }
 		_ = json.Unmarshal(listed, &found)
 		for _, project := range found {

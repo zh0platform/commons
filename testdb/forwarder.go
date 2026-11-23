@@ -28,7 +28,7 @@ type Forwarder struct {
 	commits    atomic.Int32
 	wg         sync.WaitGroup
 	mu         sync.Mutex
-	open       map[net.Conn]struct{} // accepted client connections, closed by the test's cleanup
+	open       map[net.Conn]struct{} // both sockets of every relayed connection, closed by the test's cleanup
 	closed     bool                  // the test's cleanup began: a connection accepted now is closed at once
 }
 
@@ -110,6 +110,21 @@ func (f *Forwarder) relay(client net.Conn) {
 	if err != nil {
 		return
 	}
+	// The server socket is closed by the cleanup too: a relay blocked writing to a server that stopped reading ends
+	// only when that socket closes.
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		_ = server.Close()
+		return
+	}
+	f.open[server] = struct{}{}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.open, server)
+		f.mu.Unlock()
+	}()
 	closeBoth := func() {
 		_ = client.Close()
 		_ = server.Close()

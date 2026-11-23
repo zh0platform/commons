@@ -22,6 +22,8 @@ func TestCheckNamesTheFieldThatCannotBuildAStack(t *testing.T) {
 		"Root":        func(p *Product) { p.Root = "work/shop" },
 		"Template":    func(p *Product) { p.Template = "" },
 		"Schema":      func(p *Product) { p.Schema = "shop; DROP" },
+		"Realms":      func(p *Product) { p.Realms = "test/realms" },
+		"Names":       func(p *Product) { p.Names = []string{"app.test", "LocalHost."} },
 	} {
 		broken := valid
 		change(&broken)

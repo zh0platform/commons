@@ -67,10 +67,12 @@ func (p Product) Check() error {
 		return errors.New("field Logins: at least one login")
 	case !slices.Contains(p.Logins, p.SchemaOwner):
 		return fmt.Errorf("field SchemaOwner %q: one of Logins", p.SchemaOwner)
-	case slices.Contains(p.Names, "localhost"):
+	case slices.ContainsFunc(p.Names, isLocalhost):
 		return errors.New(`field Names: "localhost" stays off the certificate, so dialling it is the wrong-name case`)
 	case !filepath.IsAbs(p.Root):
 		return fmt.Errorf("field Root %q: an absolute folder", p.Root)
+	case p.Realms != "" && !filepath.IsAbs(p.Realms):
+		return fmt.Errorf("field Realms %q: an absolute folder", p.Realms)
 	}
 	fields := []struct{ field, name string }{{"Template", p.Template}, {"Schema", p.Schema}}
 	for _, login := range p.Logins {
@@ -82,6 +84,11 @@ func (p Product) Check() error {
 		}
 	}
 	return nil
+}
+
+// isLocalhost says whether a DNS name is localhost as a certificate check reads it: any case, a final dot or not.
+func isLocalhost(name string) bool {
+	return strings.EqualFold(strings.TrimSuffix(name, "."), "localhost")
 }
 
 // PlaintextPrefix starts the names of the databases on which the server accepts the product's logins without TLS

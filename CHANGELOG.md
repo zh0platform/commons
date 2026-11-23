@@ -3,6 +3,20 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
+## v0.1.1
+
+Fixes, no change to an exported name:
+
+- `withdb`: a run removes a folder only once it made it; a failure to make it leaves everything as it was. The leftover
+  report's Compose call gets the run's filtered environment and ends on a stop signal. A setup error names the bound
+  that expired (start, provisioning or a port lookup) instead of always the start bound. Each bound states how it was
+  measured.
+- `testdb`: `Check` refuses `localhost` among `Names` in any case and with a final dot, and a relative `Realms`. The
+  relay's cleanup closes the server side of each connection too, so a relay blocked writing to a server that stopped
+  reading ends.
+- `RestoreLikeInfra` (in `v0.1.0` already, noted here): the dump's removal reads the copied row first, so it no longer
+  races the server's write (a broken pipe).
+
 ## v0.1.0
 
 The database test tooling, moved from bff's `test/` and freed of every product name:
