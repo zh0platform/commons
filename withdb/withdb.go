@@ -49,6 +49,7 @@ import (
 	"time"
 
 	"git.kloudbox.de/commons/commons/keycloak"
+	"git.kloudbox.de/commons/commons/nettest"
 	"git.kloudbox.de/commons/commons/testdb"
 )
 
@@ -199,7 +200,7 @@ func (s *Stack) setupError(step string, bound time.Duration, err error) error {
 // passwords; its address comes once it runs.
 func (s *Stack) writeFiles() (testdb.Server, error) {
 	p := s.product
-	authority, err := testdb.NewAuthority()
+	authority, err := nettest.NewAuthority()
 	if err != nil {
 		return testdb.Server{}, err
 	}

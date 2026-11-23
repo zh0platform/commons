@@ -7,12 +7,13 @@ test_ratio = 2.0
 [defaults]
 base = "origin/main"
 
-# testdb and the two helper packages stand alone; the runner uses testdb and keycloak; the test product uses testdb,
-# and its runner program withdb.
+# testdb, standin, nettest and the two helper packages stand alone; the runner uses testdb, keycloak and nettest; the
+# test product uses testdb, and its runner program withdb.
 [imports]
 only = [
   "withdb -> testdb",
   "withdb -> keycloak",
+  "withdb -> nettest",
   "internal/selftest -> testdb",
   "internal/selftest -> withdb",
 ]
