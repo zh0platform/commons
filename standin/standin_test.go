@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -24,17 +23,22 @@ import (
 	"git.kloudbox.de/commons/commons/standin"
 )
 
-// keySetPath is where each profile serves its key set below the issuer.
+// keySetPath is where each profile serves its key set below the issuer, as a verifier derives it.
 var keySetPath = map[string]string{"keycloak": "/protocol/openid-connect/certs", "auth0": ".well-known/jwks.json"}
 
-// get GETs the stand-in's key set the way a verifier would, trusting only its certificate.
-func get(s *standin.StandIn, profile string) (int, []byte, error) {
+// trusting is a client that trusts only the stand-in's certificate, as a verifier would.
+func trusting(t *testing.T, s *standin.StandIn) *http.Client {
+	t.Helper()
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM([]byte(s.TrustPEM)) {
-		return 0, nil, errors.New("TrustPEM holds no certificate")
+		t.Fatal("TrustPEM holds no certificate")
 	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}}
-	response, err := client.Get(s.Issuer + keySetPath[profile])
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}}
+}
+
+// get GETs a key set.
+func get(client *http.Client, url string) (int, []byte, error) {
+	response, err := client.Get(url)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -43,16 +47,16 @@ func get(s *standin.StandIn, profile string) (int, []byte, error) {
 	return response.StatusCode, body, err
 }
 
-func fetch(t *testing.T, s *standin.StandIn, profile string) (int, []byte) {
+func fetch(t *testing.T, client *http.Client, url string) (int, []byte) {
 	t.Helper()
-	status, body, err := get(s, profile)
+	status, body, err := get(client, url)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return status, body
 }
 
-// verified returns the claims of token if a key of the fetched set signed it under ES256, naming the token's kid.
+// verified returns the claims of token if the key of the fetched set its kid names signed it under ES256.
 func verified(t *testing.T, set []byte, token string) (map[string]any, bool) {
 	t.Helper()
 	var keys jose.JSONWebKeySet
@@ -95,9 +99,10 @@ func TestStandInServesAnAccessTokenUser(t *testing.T) {
 	for _, profile := range []string{"keycloak", "auth0"} {
 		t.Run(profile, func(t *testing.T) {
 			s := standin.Start(t, profile)
+			client, keys := trusting(t, s), s.Issuer+keySetPath[profile]
 			typed := map[string]any{"typ": "at+jwt"}
 			first := s.Token(t, typed, map[string]any{"tenant": "t-1", "exp": nil})
-			if status, set := fetch(t, s, profile); status != http.StatusOK {
+			if status, set := fetch(t, client, keys); status != http.StatusOK {
 				t.Fatalf("key set = %d, want 200", status)
 			} else if claims, ok := verified(t, set, first); !ok || claims["tenant"] != "t-1" || claims["iss"] != s.Issuer ||
 				claims["aud"] != standin.Audience || claims["sub"] != standin.Subject || claims["exp"] != nil {
@@ -105,7 +110,7 @@ func TestStandInServesAnAccessTokenUser(t *testing.T) {
 			}
 			s.Rotate()
 			second := s.Token(t, typed, nil)
-			_, set := fetch(t, s, profile)
+			_, set := fetch(t, client, keys)
 			if _, ok := verified(t, set, second); !ok {
 				t.Fatal("a token of the rotated key does not verify against the set fetched after the rotation")
 			}
@@ -113,15 +118,15 @@ func TestStandInServesAnAccessTokenUser(t *testing.T) {
 				t.Fatal("a token of the earlier key no longer verifies after a rotation")
 			}
 			s.Fail(true)
-			if status, _ := fetch(t, s, profile); status != http.StatusServiceUnavailable || s.Fetches() != 3 {
+			if status, _ := fetch(t, client, keys); status != http.StatusServiceUnavailable || s.Fetches() != 3 {
 				t.Fatalf("failing key set = %d after %d fetches, want 503 after 3", status, s.Fetches())
 			}
 		})
 	}
 }
 
-// An ID-token user's parameters: a stand-in on the caller's own mux and TLS server under another realm, minting
-// untyped and logout tokens.
+// An ID-token user's parameters: a stand-in on the caller's own mux and TLS server under another realm, whose minted
+// token verifies against the set served there.
 func TestStandInServesOnTheCallersMux(t *testing.T) {
 	mux := http.NewServeMux()
 	server := httptest.NewTLSServer(mux)
@@ -133,24 +138,14 @@ func TestStandInServesOnTheCallersMux(t *testing.T) {
 	if s.Issuer != server.URL+"/realms/other" || s.TrustPEM != "" {
 		t.Fatalf("New = Issuer %q, TrustPEM %q, want the caller's issuer and no certificate", s.Issuer, s.TrustPEM)
 	}
-	response, err := server.Client().Get(s.Issuer + keySetPath["keycloak"])
+	token, err := s.Mint(map[string]any{}, []byte(`{"sub":"x"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	set, _ := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	for _, typ := range []any{nil, "logout+jwt"} {
-		header := map[string]any{}
-		if typ != nil {
-			header["typ"] = typ
-		}
-		token, err := s.Mint(header, []byte(`{"sub":"x"}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := verified(t, set, token); !ok || protectedHeader(t, token)["typ"] != typ {
-			t.Fatalf("Mint(typ %v) = %v, verified %v", typ, protectedHeader(t, token), ok)
-		}
+	if _, set := fetch(t, server.Client(), s.Issuer+keySetPath["keycloak"]); !s.Signed(token) {
+		t.Fatal("Signed(minted token) = false")
+	} else if _, ok := verified(t, set, token); !ok {
+		t.Fatal("a minted token does not verify against the key set on the caller's mux")
 	}
 }
 
@@ -163,27 +158,25 @@ func TestTokenHeaderIsTheCallersHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	current := s.Rotate()
-	cases := map[string]struct {
-		header, want map[string]any
-		stand        bool // minted with the stand-in's key
-	}{
-		"no members":         {map[string]any{}, map[string]any{"alg": "ES256"}, false},
-		"kid and typ":        {map[string]any{"kid": "k", "typ": "JWT"}, map[string]any{"alg": "ES256", "kid": "k", "typ": "JWT"}, false},
-		"crit and b64":       {map[string]any{"crit": []any{"b64"}, "b64": true}, map[string]any{"alg": "ES256", "crit": []any{"b64"}, "b64": true}, false},
-		"a null jwk":         {map[string]any{"jwk": nil}, map[string]any{"alg": "ES256", "jwk": nil}, false},
-		"a caller's alg":     {map[string]any{"alg": "none"}, map[string]any{"alg": "ES256"}, false},
-		"stand-in, typed":    {map[string]any{"typ": "at+jwt"}, map[string]any{"alg": "ES256", "kid": current, "typ": "at+jwt"}, true},
-		"stand-in, alg, kid": {map[string]any{"alg": "none", "kid": "other"}, map[string]any{"alg": "ES256", "kid": current}, true},
-		"stand-in, untyped":  {map[string]any{}, map[string]any{"alg": "ES256", "kid": current}, true},
+	ownKey := func(header map[string]any) (string, error) {
+		return standin.SignPayload(own, "ES256", header, []byte(`{}`))
 	}
-	for name, c := range cases {
+	standInKey := func(header map[string]any) (string, error) { return s.Mint(header, []byte(`{}`)) }
+	for name, c := range map[string]struct {
+		sign         func(map[string]any) (string, error)
+		header, want map[string]any
+	}{
+		"no members":         {ownKey, map[string]any{}, map[string]any{"alg": "ES256"}},
+		"kid and typ":        {ownKey, map[string]any{"kid": "k", "typ": "JWT"}, map[string]any{"alg": "ES256", "kid": "k", "typ": "JWT"}},
+		"crit and b64":       {ownKey, map[string]any{"crit": []any{"b64"}, "b64": true}, map[string]any{"alg": "ES256", "crit": []any{"b64"}, "b64": true}},
+		"a null jwk":         {ownKey, map[string]any{"jwk": nil}, map[string]any{"alg": "ES256", "jwk": nil}},
+		"a caller's alg":     {ownKey, map[string]any{"alg": "none"}, map[string]any{"alg": "ES256"}},
+		"stand-in, typed":    {standInKey, map[string]any{"typ": "at+jwt"}, map[string]any{"alg": "ES256", "kid": current, "typ": "at+jwt"}},
+		"stand-in, alg, kid": {standInKey, map[string]any{"alg": "none", "kid": "other"}, map[string]any{"alg": "ES256", "kid": current}},
+		"stand-in, untyped":  {standInKey, map[string]any{}, map[string]any{"alg": "ES256", "kid": current}},
+	} {
 		before := maps.Clone(c.header)
-		var token string
-		if c.stand {
-			token, err = s.Mint(c.header, []byte(`{}`))
-		} else {
-			token, err = standin.SignPayload(own, "ES256", c.header, []byte(`{}`))
-		}
+		token, err := c.sign(c.header)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -191,24 +184,40 @@ func TestTokenHeaderIsTheCallersHeader(t *testing.T) {
 			t.Errorf("%s: header = %v, caller's map %v, want %v and the map unchanged", name, got, c.header, c.want)
 		}
 	}
-	if _, err := standin.Sign(own, "RS256", map[string]any{}, map[string]any{}); err == nil {
+}
+
+// A key cannot sign under an algorithm of another key type.
+func TestSignRefusesAnAlgorithmTheKeyCannotSign(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := standin.Sign(key, "RS256", map[string]any{}, map[string]any{}); err == nil {
 		t.Error("Sign(P-256 key, RS256) = nil error, want refused")
 	}
 }
 
 // A held fetch waits for its release and answers with the state it finds then.
 func TestHeldFetchAnswersTheStateAtItsRelease(t *testing.T) {
-	cases := map[string]struct {
-		during func(s *standin.StandIn) string // changes the state while held; returns a key ID the answer must hold
-		status int
-	}{
-		"failing":  {func(s *standin.StandIn) string { s.Fail(true); return "" }, http.StatusServiceUnavailable},
-		"rotated":  {func(s *standin.StandIn) string { return s.Rotate() }, http.StatusOK},
-		"replaced": {func(s *standin.StandIn) string { s.Answer([]byte{}); return "" }, http.StatusOK},
-	}
-	for name, c := range cases {
+	for name, during := range map[string]func(s *standin.StandIn) func(status int, body []byte) bool{
+		"failing": func(s *standin.StandIn) func(int, []byte) bool {
+			s.Fail(true)
+			return func(status int, _ []byte) bool { return status == http.StatusServiceUnavailable }
+		},
+		"rotated": func(s *standin.StandIn) func(int, []byte) bool {
+			id := s.Rotate()
+			return func(status int, body []byte) bool {
+				return status == http.StatusOK && strings.Contains(string(body), id)
+			}
+		},
+		"replaced": func(s *standin.StandIn) func(int, []byte) bool {
+			s.Answer([]byte{})
+			return func(status int, body []byte) bool { return status == http.StatusOK && len(body) == 0 }
+		},
+	} {
 		t.Run(name, func(t *testing.T) {
 			s := standin.Start(t, "auth0")
+			client := trusting(t, s)
 			release := s.Hold(t)
 			type answer struct {
 				status int
@@ -217,7 +226,7 @@ func TestHeldFetchAnswersTheStateAtItsRelease(t *testing.T) {
 			}
 			answered := make(chan answer, 1)
 			go func() {
-				status, body, err := get(s, "auth0")
+				status, body, err := get(client, s.Issuer+keySetPath["auth0"])
 				answered <- answer{status, body, err}
 			}()
 			for deadline := time.Now().Add(5 * time.Second); s.Fetches() == 0; runtime.Gosched() {
@@ -230,15 +239,12 @@ func TestHeldFetchAnswersTheStateAtItsRelease(t *testing.T) {
 				t.Fatal("a held fetch answered before its release")
 			default:
 			}
-			id := c.during(s)
+			want := during(s)
 			release()
 			release()
 			got := <-answered
-			if got.err != nil {
-				t.Fatal(got.err)
-			}
-			if got.status != c.status || (name == "replaced" && len(got.body) != 0) || !strings.Contains(string(got.body), id) {
-				t.Fatalf("held fetch = %d %q, want %d holding %q", got.status, got.body, c.status, id)
+			if got.err != nil || !want(got.status, got.body) {
+				t.Fatalf("held fetch = %d %q, %v, want the state set during the hold", got.status, got.body, got.err)
 			}
 		})
 	}
@@ -267,7 +273,7 @@ func TestSecondHoldFailsTheTest(t *testing.T) {
 
 // New refuses a profile it does not know and an issuer it cannot serve the profile's key set under.
 func TestNewRefusesWhatItCannotServe(t *testing.T) {
-	cases := map[string][2]string{
+	for name, c := range map[string][2]string{
 		"unknown profile":       {"okta", "https://idp.example/"},
 		"plain http":            {"keycloak", "http://idp.example/realms/x"},
 		"no host":               {"keycloak", "https:opaque"},
@@ -276,8 +282,7 @@ func TestNewRefusesWhatItCannotServe(t *testing.T) {
 		"a fragment":            {"auth0", "https://idp.example/#f"},
 		"keycloak with a slash": {"keycloak", "https://idp.example/realms/x/"},
 		"auth0 without a slash": {"auth0", "https://idp.example"},
-	}
-	for name, c := range cases {
+	} {
 		if _, err := standin.New(c[0], c[1], http.NewServeMux()); err == nil {
 			t.Errorf("New(%s) = nil error, want refused", name)
 		}

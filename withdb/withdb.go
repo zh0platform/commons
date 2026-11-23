@@ -4,7 +4,7 @@
 //
 //	os.Exit(withdb.Run(product, command))
 //
-// The runner exits 2 for its own usage error; Run answers 1 when the description, the start or a step before the
+// A product's runner exits 2 for its own usage error; Run answers 1 when the description, the start or a step before the
 // command fails, when a signal came before the command, or when the command could not start, otherwise the command's
 // status, raised to at least 1 when the removal fails. Each run removes its project and its folder on every exit it
 // makes itself; a run killed hard is named, with the commands that remove it, by the next start of the same product on

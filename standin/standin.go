@@ -58,26 +58,28 @@ func New(profile, issuer string, mux *http.ServeMux) (*StandIn, error) {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("stand-in issuer %q: want https with a host and no user, query or fragment", issuer)
 	}
-	slash := strings.HasSuffix(issuer, "/")
-	var path string
-	switch profile {
-	case "keycloak":
-		if slash {
-			return nil, fmt.Errorf("stand-in issuer %q: a keycloak issuer does not end in a slash", issuer)
-		}
-		path = u.Path + "/protocol/openid-connect/certs"
-	case "auth0":
-		if !slash {
-			return nil, fmt.Errorf("stand-in issuer %q: an auth0 issuer ends in a slash", issuer)
-		}
-		path = u.Path + ".well-known/jwks.json"
-	default:
+	form, known := profiles[profile]
+	switch {
+	case !known:
 		return nil, fmt.Errorf("stand-in profile %q: want keycloak or auth0", profile)
+	case strings.HasSuffix(issuer, "/") != form.slash:
+		return nil, fmt.Errorf("stand-in issuer %q: a %s issuer %s", issuer, profile, form.slashRule)
 	}
 	s := &StandIn{Issuer: issuer, signers: map[string]*ecdsa.PrivateKey{}}
 	s.Rotate()
-	mux.HandleFunc(path, s.keys)
+	mux.HandleFunc(u.Path+form.keySet, s.keys)
 	return s, nil
+}
+
+// profiles is each profile's issuer form: whether it ends in a slash, the key set's path after the issuer's, and the
+// issuer path Start serves it under.
+var profiles = map[string]struct {
+	slash          bool
+	slashRule      string
+	keySet, issuer string
+}{
+	"keycloak": {false, "does not end in a slash", "/protocol/openid-connect/certs", "/realms/test"},
+	"auth0":    {true, "ends in a slash", ".well-known/jwks.json", "/"},
 }
 
 // Start runs a stand-in of profile on a TLS test server on a loopback port until the test ends: issuer
@@ -87,11 +89,7 @@ func Start(t testing.TB, profile string) *StandIn {
 	mux := http.NewServeMux()
 	server := httptest.NewTLSServer(mux)
 	t.Cleanup(server.Close)
-	issuer := server.URL + "/realms/test"
-	if profile == "auth0" {
-		issuer = server.URL + "/"
-	}
-	s, err := New(profile, issuer, mux)
+	s, err := New(profile, server.URL+profiles[profile].issuer, mux)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +266,7 @@ func (s *StandIn) keys(w http.ResponseWriter, _ *http.Request) {
 	}
 	s.mu.Lock()
 	failing, answer := s.failing, s.published
-	if answer == nil {
+	if !failing && answer == nil {
 		answer = s.keySet()
 	}
 	s.mu.Unlock()

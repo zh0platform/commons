@@ -128,19 +128,21 @@ func TestRelayClosesAConnectionWhoseMessageExceedsTheCap(t *testing.T) {
 func TestPlaintextAdmitsOnlyTheListedLogins(t *testing.T) {
 	plaintext := testdb.NewPlaintext(t, product(t))
 	ordinary := testdb.New(t, product(t))
+	conn, err := plainConnect(plaintext.Settings(selftest.RuntimeLogin))
+	if err != nil {
+		t.Fatalf("connect a listed login to a plaintext database without TLS: %v", err)
+	}
+	_ = conn.Close(context.Background())
 	for _, c := range []struct {
 		database *testdb.Database
 		login    string
-		admitted bool
 	}{
-		{plaintext, selftest.RuntimeLogin, true},
-		{plaintext, selftest.RecoveryLogin, false},
-		{ordinary, selftest.RuntimeLogin, false},
+		{plaintext, selftest.RecoveryLogin},
+		{ordinary, selftest.RuntimeLogin},
 	} {
-		err := connectWithoutTLS(c.database.Settings(c.login))
-		var refused *pgconn.PgError
-		if c.admitted && err != nil || !c.admitted && (!errors.As(err, &refused) || refused.Code != "28000") {
-			t.Errorf("connect %s to %s without TLS = %v, want admitted %v (a refusal is SQLSTATE 28000)", c.login, c.database.Name, err, c.admitted)
+		_, err := plainConnect(c.database.Settings(c.login))
+		if refused, ok := errors.AsType[*pgconn.PgError](err); !ok || refused.Code != "28000" {
+			t.Errorf("connect %s to %s without TLS = %v, want refused (SQLSTATE 28000)", c.login, c.database.Name, err)
 		}
 	}
 	plaintext.Connect(t, selftest.RecoveryLogin, plaintext.LoginsPassword())
@@ -178,7 +180,7 @@ func TestRelayDropsTheAnswerAfterTheSkippedCompletions(t *testing.T) {
 	}
 }
 
-// plainConnect connects without TLS, through a relay or straight to a plaintext database.
+// plainConnect connects without TLS, through a relay or straight to a database.
 func plainConnect(settings testdb.Settings) (*pgx.Conn, error) {
 	config, err := pgx.ParseConfig(fmt.Sprintf("host=%s port=%d dbname=%s user=%s sslmode=disable",
 		settings.Host, settings.Port, settings.Database, settings.Login))
@@ -189,14 +191,6 @@ func plainConnect(settings testdb.Settings) (*pgx.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return pgx.ConnectConfig(ctx, config)
-}
-
-func connectWithoutTLS(settings testdb.Settings) error {
-	conn, err := plainConnect(settings)
-	if err != nil {
-		return err
-	}
-	return conn.Close(context.Background())
 }
 
 func dial(t *testing.T, relay *testdb.Forwarder) net.Conn {

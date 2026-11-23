@@ -96,7 +96,7 @@ CI on a candidate tag (`vX.Y.Z-rc.N`) before the release tag goes on the same co
   temporary folder, it names with its removal commands; Docker objects made before the first container and folders
   under another temporary folder are not found. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
 - **ownership**: A run changes only the project and folder it created; leftovers of other runs are reported, never
-  removed. Shown across processes, since the package allows one stack per process. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
+  removed. Shown across processes, since the package allows one run per process. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
 - **trust**: Settings. The command gets this run's settings only (its addresses, the DevTools address, passwords and
   certificate material); no inherited setting of another run of the product, no inherited Compose setting and no
   inherited variable the product refuses reaches it. Tests: `withdb/withdb_test.go::TestInheritedDropsRunnerSettingsComposeAndRefusedVariables`, `withdb/stack_test.go::the command's environment`

@@ -33,7 +33,7 @@ type Realm struct {
 	Clients []struct {
 		ID           string   `json:"clientId"`
 		Secret       string   `json:"secret"`
-		RedirectURIs []string `json:"redirectUris"` // empty when the file names none
+		RedirectURIs []string `json:"redirectUris"`
 	} `json:"clients"`
 	Users []struct {
 		Name        string `json:"username"`
