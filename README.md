@@ -26,11 +26,12 @@ code stays in that project until a second one needs the same.
 
 ## Using it
 
-A product describes itself once, in a `testdb.Product` (its prefixes, logins, template, schema, migration step, the
-variables it refuses), and writes a small runner `main` that parses its flags and exits with
-`withdb.Run(product, command)`; the package documentation of `withdb` states the exit rule. Its tests call `testdb.New`, `NewMigrated` or `NewPlaintext`
-with the same `Product`. `internal/selftest` is a complete example: the module's own test product, with the agent's
-parameters.
+A product describes its database once, in a `testdb.Product` (its variable prefix, logins, statements, template,
+schema, migration step), and its tests call `testdb.New`, `NewMigrated` or `NewPlaintext` with it. Its small runner
+`main` wraps that in a `withdb.Product` (the project prefix, the certificate names, the variables it refuses, its root,
+realms, Compose files, browser and quiet switches), parses its flags and exits with `withdb.Run(product, command)`; the
+package documentation of `withdb` states the exit rule. `internal/selftest` is a complete example: the module's own
+test product, a shop.
 
 The services are `postgres` (container port 5432), with a realm folder `keycloak` (8443, network alias `idp.test`) and,
 with `Browser`, `chrome` (DevTools on 9222, its address handed to the command as `<prefix>DEVTOOLS`; a product's

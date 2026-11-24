@@ -81,13 +81,10 @@ vet:
 tidy-check:
 	go mod tidy -diff
 
-# The module is shared by several products: no Go, YAML, shell, TOML or template file of it names one. The test
-# product carries the agent's parameters on purpose, so its folder and the tests that drive it (withdb's and testdb's)
-# may name the agent.
+# The module is shared by several products: no Go, YAML, shell, TOML or template file of it names one.
 NAMED := '*.go' '*.yaml' '*.yml' '*.sh' '*.toml' '*.tmpl'
 names:
-	@! git grep --untracked -il -e bff -e membership -- $(NAMED) || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
-	@! git grep --untracked -il -e agent -- $(NAMED) ':!internal/selftest' ':!withdb/*_test.go' ':!testdb/*_test.go' || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
+	@! git grep --untracked -il -e bff -e membership -e agent -- $(NAMED) || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
 
 vuln:
 	go run $(GOVULNCHECK) -tags $(TAGS) ./...

@@ -1,6 +1,6 @@
 // Package withdb starts one run's test stack, a PostgreSQL server of its own and, if the product asks, a Keycloak and
 // a Chromium, as a Compose project, and runs a command against it. A product's runner program parses its own flags
-// into a testdb.Product and exits with Run's status:
+// into a Product and exits with Run's status:
 //
 //	os.Exit(withdb.Run(product, command))
 //
@@ -31,12 +31,9 @@ import (
 	"crypto/x509"
 	"embed"
 	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -91,7 +88,7 @@ var embedded embed.FS
 
 // stack is one run's started Compose project.
 type stack struct {
-	product    testdb.Product
+	product    Product
 	name       string
 	folder     string
 	files      []string // absolute, in order
@@ -107,6 +104,46 @@ type stack struct {
 	passed  bool        // the command ended with status 0
 }
 
+// Product describes one product's test stack: its database (testdb.Product) and what the runner adds. Project and
+// Root are required (Check); a zero optional field turns its feature off.
+type Product struct {
+	testdb.Product
+	Project string                 // start of every Compose project and run-folder name, such as "shop-test-"
+	Names   []string               // DNS names on the server certificate besides the module's own
+	Refused func(name string) bool // inherited variables no process the runner starts may get
+	Root    string                 // absolute folder the product's own Compose files resolve from
+	Realms  string                 // absolute folder of the Keycloak realm files; empty: no Keycloak
+	Files   []string               // the product's own Compose files, after the module's, relative to Root
+	Browser bool                   // a Chromium that accepts the server certificate (the service chrome)
+	Quiet   bool                   // a failed run prints no service logs
+}
+
+var projectForm = regexp.MustCompile(`^[a-z][a-z0-9-]*-$`)
+
+// Check reports the first field of the description that a stack cannot be built from, by its name: the database's
+// fields (testdb.Product.Check), then the runner's.
+func (p Product) Check() error {
+	if err := p.Product.Check(); err != nil {
+		return err
+	}
+	switch {
+	case !projectForm.MatchString(p.Project):
+		return fmt.Errorf("field Project %q: a lowercase letter, then lowercase letters, digits and '-', ending in '-'", p.Project)
+	case slices.ContainsFunc(p.Names, isLocalhost):
+		return errors.New(`field Names: "localhost" stays off the certificate, so dialling it is the wrong-name case`)
+	case !filepath.IsAbs(p.Root):
+		return fmt.Errorf("field Root %q: an absolute folder", p.Root)
+	case p.Realms != "" && !filepath.IsAbs(p.Realms):
+		return fmt.Errorf("field Realms %q: an absolute folder", p.Realms)
+	}
+	return nil
+}
+
+// isLocalhost says whether a DNS name is localhost as a certificate check reads it: any case, a final dot or not.
+func isLocalhost(name string) bool {
+	return strings.EqualFold(strings.TrimSuffix(name, "."), "localhost")
+}
+
 // errStopped answers a run that a signal stopped before its command.
 var errStopped = errors.New("stopped during setup")
 
@@ -114,7 +151,7 @@ var errStopped = errors.New("stopped during setup")
 // the stack and answers the exit status for the product's runner (package documentation). INT and TERM pass to the
 // running command; before it, they stop the start. Each error is printed once, each line after "withdb: ", on standard
 // error.
-func Run(p testdb.Product, command []string) int {
+func Run(p Product, command []string) int {
 	if len(command) == 0 {
 		report(errors.New("setup failed: no command to run"))
 		return 1
@@ -145,7 +182,7 @@ func report(err error) {
 // provisioned server. It catches INT and TERM from then on. When a step fails or a signal arrives it prints the
 // services' logs (unless the product is quiet), removes what it started and answers the error; nothing is left to
 // close.
-func startStack(p testdb.Product) (*stack, error) {
+func startStack(p Product) (*stack, error) {
 	if err := p.Check(); err != nil {
 		return nil, fmt.Errorf("setup failed: checking the description: %w", err)
 	}
@@ -195,7 +232,7 @@ func (s *stack) start() error {
 	// A bound of its own, not what is left of the start's, so an expired one is named truthfully.
 	provisionCtx, cancelProvision := context.WithTimeout(s.stop, provisionBound)
 	defer cancelProvision()
-	if err := testdb.Provision(provisionCtx, s.product, server); err != nil {
+	if err := testdb.Provision(provisionCtx, s.product.Product, server); err != nil {
 		return s.setupError("provisioning", provisionBound, err)
 	}
 	s.commandEnv = s.product.ServerEnviron(server)
@@ -205,14 +242,14 @@ func (s *stack) start() error {
 			return s.setupError("reading a port", callBound, err)
 		}
 		s.commandEnv = append(s.commandEnv,
-			keycloak.URLVariable+"=https://"+net.JoinHostPort(host, port), keycloak.CAVariable+"="+server.CA)
+			keycloakURL.in(s.product)+"=https://"+net.JoinHostPort(host, port), keycloakCA.in(s.product)+"="+server.CA)
 	}
 	if s.product.Browser {
 		host, port, err := s.published(chromeService, chromePort)
 		if err != nil {
 			return s.setupError("reading a port", callBound, err)
 		}
-		s.commandEnv = append(s.commandEnv, s.product.Variables+devTools+"="+net.JoinHostPort(host, port))
+		s.commandEnv = append(s.commandEnv, devTools.in(s.product)+"="+net.JoinHostPort(host, port))
 	}
 	if len(s.product.Files) > 0 {
 		// The command addresses the stack with plain docker compose, over the same files in the same order.
@@ -255,16 +292,19 @@ func (s *stack) writeFiles() (testdb.Server, error) {
 		return testdb.Server{}, err
 	}
 	server := testdb.Server{CA: authority.PEM(), AdminPassword: rand.Text(), LoginPassword: rand.Text()}
-	for _, value := range []struct{ suffix, value string }{
+	for _, value := range []struct {
+		variable runnerVariable
+		value    string
+	}{
 		{adminPassword, server.AdminPassword}, {serverCert, certPEM}, {serverKey, keyPEM},
 		{serverPin, pin}, {pgHBA, hba(p)}, {root, p.Root},
 	} {
-		s.composeEnv = append(s.composeEnv, p.Variables+value.suffix+"="+value.value)
+		s.composeEnv = append(s.composeEnv, value.variable.in(p)+"="+value.value)
 	}
 	names := []string{"compose.postgres.yaml"}
 	if p.Realms != "" {
 		names = append(names, "compose.keycloak.yaml")
-		s.composeEnv = append(s.composeEnv, realmsVariable+"="+p.Realms)
+		s.composeEnv = append(s.composeEnv, realms.in(p)+"="+p.Realms)
 	}
 	if p.Browser {
 		names = append(names, "compose.chrome.yaml")
@@ -289,24 +329,65 @@ func (s *stack) writeFiles() (testdb.Server, error) {
 	return server, nil
 }
 
-// The variables, after the product's prefix, that Compose and the product's files read; and the realm folder's.
+// runnerVariable is a variable the runner sets besides the server's (testdb.Product.ServerVariables). Every one is in
+// runnerVariables, which inherited drops, so no variable the runner sets can be missing from the filter.
+type runnerVariable int
+
 const (
-	adminPassword  = "ADMIN_PASSWORD"
-	serverCert     = "SERVER_CERT"
-	serverKey      = "SERVER_KEY"
-	serverPin      = "SERVER_SPKI"
-	pgHBA          = "PG_HBA"
-	root           = "ROOT"
-	devTools       = "DEVTOOLS" // the command's, the address of Chromium's DevTools
-	realmsVariable = "KEYCLOAK_REALMS"
-	// keycloakAlias is Keycloak's name on the stack's network (compose.keycloak.yaml), on the server certificate.
-	keycloakAlias = "idp.test"
+	adminPassword runnerVariable = iota // Compose's and the product's files'
+	serverCert
+	serverKey
+	serverPin
+	pgHBA
+	root
+	devTools // the command's: the address of Chromium's DevTools
+	keycloakURL
+	keycloakCA
+	realms // Compose's: the realm folder
+	runnerVariableCount
 )
+
+// runnerVariables are their names, after the product's prefix where prefixed.
+var runnerVariables = [runnerVariableCount]struct {
+	name     string
+	prefixed bool
+}{
+	adminPassword: {"ADMIN_PASSWORD", true},
+	serverCert:    {"SERVER_CERT", true},
+	serverKey:     {"SERVER_KEY", true},
+	serverPin:     {"SERVER_SPKI", true},
+	pgHBA:         {"PG_HBA", true},
+	root:          {"ROOT", true},
+	devTools:      {"DEVTOOLS", true},
+	keycloakURL:   {keycloak.URLVariable, false},
+	keycloakCA:    {keycloak.CAVariable, false},
+	realms:        {"KEYCLOAK_REALMS", false},
+}
+
+// in is the variable's name for a product.
+func (v runnerVariable) in(p Product) string {
+	if runnerVariables[v].prefixed {
+		return p.Variables + runnerVariables[v].name
+	}
+	return runnerVariables[v].name
+}
+
+// runnerNames are the names of every variable the runner sets: the server's, then runnerVariables'.
+func runnerNames(p Product) []string {
+	names := p.ServerVariables()
+	for v := range runnerVariableCount {
+		names = append(names, v.in(p))
+	}
+	return names
+}
+
+// keycloakAlias is Keycloak's name on the stack's network (compose.keycloak.yaml), on the server certificate.
+const keycloakAlias = "idp.test"
 
 // hba allows TLS for every login, and plaintext only for the product's plaintext logins (all its logins when it lists
 // none) on the lost-commit tests' databases, which the relay reaches on loopback. The image's own health check uses
 // the server's socket.
-func hba(p testdb.Product) string {
+func hba(p Product) string {
 	plaintext := p.PlaintextLogins
 	if len(plaintext) == 0 {
 		plaintext = p.Logins
@@ -462,96 +543,15 @@ func (s *stack) stopSignals() {
 // inherited is the runner's environment without the variables the product refuses, without Compose's own and
 // without every name the runner sets, so a shell that ran or exported another run's settings cannot point this run
 // at that run's servers.
-func inherited(p testdb.Product) []string {
-	runnerNames := slices.Concat(p.ServerVariables(), []string{keycloak.URLVariable, keycloak.CAVariable, realmsVariable})
-	for _, suffix := range []string{adminPassword, serverCert, serverKey, serverPin, pgHBA, root, devTools} {
-		runnerNames = append(runnerNames, p.Variables+suffix)
-	}
+func inherited(p Product) []string {
+	names := runnerNames(p)
 	var kept []string
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		refused := p.Refused != nil && p.Refused(name)
-		if !refused && !strings.HasPrefix(name, "COMPOSE_") && !slices.Contains(runnerNames, name) {
+		if !refused && !strings.HasPrefix(name, "COMPOSE_") && !slices.Contains(names, name) {
 			kept = append(kept, entry)
 		}
 	}
 	return kept
-}
-
-// owner is the start of this product's project names on this machine: the product's prefix and a tag of the host
-// name and, on Linux, the process namespace, so a Docker daemon shared with another machine or container never makes
-// process IDs this one cannot see look dead here.
-func owner(p testdb.Product) string {
-	host, _ := os.Hostname()
-	namespace, _ := os.Readlink("/proc/self/ns/pid") // empty where there is none, as on macOS
-	tag := sha256.Sum256([]byte(host + "\x00" + namespace))
-	return p.Project + hex.EncodeToString(tag[:4]) + "-"
-}
-
-// reportLeftovers names the projects and folders of this product's runs on this machine whose process is gone (a run
-// killed before its cleanup), with the commands that remove them. It removes nothing: a name is no proof of ownership.
-// A failed listing is not fatal: the run's own Compose calls meet a Docker that does not answer. It sees only the
-// projects of the Docker daemon it reaches and the folders under this process's temporary folder;
-// Docker objects made before a run's first container are not listed by Compose.
-func reportLeftovers(stop context.Context, p testdb.Product, environ []string) {
-	prefix := owner(p)
-	projects, folders := map[string]bool{}, map[string]bool{}
-	ctx, cancel := context.WithTimeout(stop, callBound)
-	defer cancel()
-	list := exec.CommandContext(ctx, "docker", "compose", "ls", "--all", "--format", "json")
-	list.Env = environ
-	if listed, err := list.Output(); err == nil {
-		var found []struct{ Name string }
-		_ = json.Unmarshal(listed, &found)
-		for _, project := range found {
-			projects[project.Name] = isLeftover(prefix, project.Name)
-		}
-	}
-	if entries, err := os.ReadDir(os.TempDir()); err == nil {
-		for _, entry := range entries {
-			folders[entry.Name()] = entry.IsDir() && isLeftover(prefix, entry.Name())
-		}
-	}
-	names := map[string]bool{}
-	maps.Copy(names, projects)
-	maps.Copy(names, folders)
-	for _, name := range slices.Sorted(maps.Keys(names)) {
-		folder := filepath.Join(os.TempDir(), name)
-		var subject string
-		var commands []string
-		if projects[name] {
-			subject, commands = name, append(commands, projectRemoval(name))
-		}
-		if folders[name] {
-			commands = append(commands, "rm -rf "+quoted(folder))
-			if subject == "" {
-				subject = "the folder " + folder
-			}
-		}
-		if subject != "" {
-			_, _ = fmt.Fprintf(os.Stderr, "withdb: %s is left from a run that ended without its cleanup; remove it with: %s\n",
-				subject, strings.Join(commands, " && "))
-		}
-	}
-}
-
-// runSuffix is what follows a run's owner prefix: its process ID and 8 random characters (lowercased base32).
-var runSuffix = regexp.MustCompile(`^([0-9]+)-[a-z2-7]{8}$`)
-
-// isLeftover says whether a name is one of this machine's runs of the product whose process is gone. A name is no
-// proof of who made it; the report only names what matches.
-func isLeftover(prefix, name string) bool {
-	rest, ours := strings.CutPrefix(name, prefix)
-	found := runSuffix.FindStringSubmatch(rest)
-	if !ours || found == nil {
-		return false
-	}
-	pid, err := strconv.Atoi(found[1])
-	return err == nil && !processRuns(pid)
-}
-
-// processRuns says whether a process ID is in use on this machine. A process of another user answers EPERM and runs.
-func processRuns(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

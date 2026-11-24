@@ -1,5 +1,5 @@
 // Package testdb gives tests their own PostgreSQL database on the server a withdb runner started: a clone of a
-// template that holds what a product's infrastructure provisions (its logins and its schema). A product describes
+// template that holds what a product's deployment provisions (its logins and its schema). A product describes
 // itself once, in a Product, which both its runner and its tests use.
 package testdb
 
@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -23,10 +22,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Product describes one product's test stack. Project, Variables, Logins, Template, Schema, SchemaOwner and Root are
-// required (Check); a zero optional field turns its feature off.
+// Product describes one product's database: its server's logins and statements, and the template its test databases
+// are cloned from. Variables, Logins, Template, Schema and SchemaOwner are required (Check); a zero optional field turns
+// its feature off. A runner's own fields (its project, certificate names, Compose files) are withdb's.
 type Product struct {
-	Project   string   // start of every Compose project and run-folder name, such as "shop-test-"
 	Variables string   // start of every variable the runner sets but the Keycloak and Compose names, such as "SHOP_TEST_"
 	Logins    []string // the server's logins, all with the run's login password
 	// PlaintextLogins are the logins the server admits without TLS on the PlaintextPrefix databases; empty: all Logins.
@@ -37,27 +36,17 @@ type Product struct {
 	Template    string                      // the template database every test database is cloned from
 	Schema      string                      // the schema created in the template
 	SchemaOwner string                      // the login that owns Schema; one of Logins
-	Names       []string                    // DNS names on the server certificate besides the module's own
 	Migrate     func(testing.TB, *Database) // the product's migration step for one test database
-	Refused     func(name string) bool      // inherited variables no process the runner starts may get
-	Root        string                      // absolute folder the product's own Compose files resolve from
-	Realms      string                      // absolute folder of the Keycloak realm files; empty: no Keycloak
-	Files       []string                    // the product's own Compose files, after the module's, relative to Root
-	Browser     bool                        // a Chromium that accepts the server certificate (withdb's service chrome)
-	Quiet       bool                        // a failed run prints no service logs
 }
 
 var (
-	projectForm  = regexp.MustCompile(`^[a-z][a-z0-9-]*-$`)
 	variableForm = regexp.MustCompile(`^[A-Z][A-Z0-9_]*_$`)
 	sqlName      = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 )
 
-// Check reports the first field of the description that a stack cannot be built from, by its name.
+// Check reports the first field of the description that a server cannot be provisioned from, by its name.
 func (p Product) Check() error {
 	switch {
-	case !projectForm.MatchString(p.Project):
-		return fmt.Errorf("field Project %q: a lowercase letter, then lowercase letters, digits and '-', ending in '-'", p.Project)
 	case !variableForm.MatchString(p.Variables):
 		return fmt.Errorf("field Variables %q: upper-case letters, digits and '_', ending in '_'", p.Variables)
 	case len(p.Logins) == 0:
@@ -66,12 +55,6 @@ func (p Product) Check() error {
 		return fmt.Errorf("field SchemaOwner %q: one of Logins", p.SchemaOwner)
 	case slices.ContainsFunc(p.PlaintextLogins, func(login string) bool { return !slices.Contains(p.Logins, login) }):
 		return fmt.Errorf("field PlaintextLogins %v: each one of Logins", p.PlaintextLogins)
-	case slices.ContainsFunc(p.Names, isLocalhost):
-		return errors.New(`field Names: "localhost" stays off the certificate, so dialling it is the wrong-name case`)
-	case !filepath.IsAbs(p.Root):
-		return fmt.Errorf("field Root %q: an absolute folder", p.Root)
-	case p.Realms != "" && !filepath.IsAbs(p.Realms):
-		return fmt.Errorf("field Realms %q: an absolute folder", p.Realms)
 	}
 	fields := []struct{ field, name string }{{"Template", p.Template}, {"Schema", p.Schema}}
 	for _, login := range p.Logins {
@@ -85,13 +68,8 @@ func (p Product) Check() error {
 	return nil
 }
 
-// isLocalhost says whether a DNS name is localhost as a certificate check reads it: any case, a final dot or not.
-func isLocalhost(name string) bool {
-	return strings.EqualFold(strings.TrimSuffix(name, "."), "localhost")
-}
-
 // PlaintextPrefix starts the names of the databases on which the server accepts the product's plaintext logins
-// without TLS (the lost-commit tests' relay).
+// without TLS, for a relay between a test and the server that can drop an answer.
 const PlaintextPrefix = "lostcommit_"
 
 // Administrator is the server's superuser, the image's own.
@@ -147,8 +125,8 @@ func (p Product) server() (Server, error) {
 	return Server{Host: values[0], Port: values[1], CA: values[2], AdminPassword: values[3], LoginPassword: values[4]}, nil
 }
 
-// Provision creates the product's logins, then its statements, then the template with its schema, as the product's
-// infrastructure does. It runs with every kind of statement logging off, so no statement that carries the login
+// Provision creates the product's logins, then its statements, then the template with its schema, as a deployment
+// does. It runs with every kind of statement logging off, so no statement that carries the login
 // password, failed or not, reaches the server's log, which a failed run prints.
 func Provision(ctx context.Context, p Product, s Server) error {
 	conn, err := connect(ctx, s, admin, s.AdminPassword, "postgres")
@@ -193,7 +171,7 @@ type Database struct {
 	server  Server
 }
 
-// New clones the template into a database only this test uses, closed like infrastructure's (CONNECT for the
+// New clones the template into a database only this test uses, closed like a deployment's (CONNECT for the
 // product's logins only), and drops it when the test ends. A missing server is a setup failure, never a skip.
 func New(t testing.TB, p Product) *Database {
 	t.Helper()
@@ -217,7 +195,7 @@ func (d *Database) Migrate(t testing.TB) {
 	d.product.Migrate(t, d)
 }
 
-// NewPlaintext is New for a database the server also accepts without TLS (the lost-commit tests' relay).
+// NewPlaintext is New for a database the server also accepts without TLS, for a relay that can drop an answer.
 func NewPlaintext(t testing.TB, p Product) *Database {
 	t.Helper()
 	return newNamed(t, p, PlaintextPrefix)
@@ -279,7 +257,7 @@ func (d *Database) drop(t testing.TB) {
 	}
 }
 
-// RestoreLikeInfra dumps this database and restores it the way infrastructure's restore does: pg_dump in custom
+// RestoreLikeInfra dumps this database and restores it the way a deployment's restore does: pg_dump in custom
 // format without the rows of unlogged tables, a target created closed from template0 (CONNECT for the given logins
 // only), pg_restore in one transaction with owners and grants. The programs run inside the server's container. The
 // copy is dropped when the test ends.
