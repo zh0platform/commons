@@ -105,6 +105,8 @@ func TestServerProgramsAreJudgedByTheirExitStatus(t *testing.T) {
 	}
 }
 
+// A test's database and relay end with it: the database is dropped and a connection the relay accepted is closed,
+// even one that never sent a byte.
 func TestDatabaseAndRelayEndWithTheirTest(t *testing.T) {
 	observer := testdb.New(t, product(t)).Admin(t)
 	var name string

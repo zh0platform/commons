@@ -2,6 +2,8 @@
 GO_TOOLCHAIN := 1.27.4
 LINT := bin/golangci-lint
 GO_TEST := go test -count=1 -race -shuffle=on
+# The build tags that together compile every test.
+TAGS := database,stack,keycloak
 # The module's own runner, with its test product (internal/selftest).
 RUNNER := go run ./internal/selftest/withdb
 COUNT ?= 20
@@ -27,12 +29,12 @@ export GOFLAGS := -mod=readonly
 .PHONY: qa fix unit stack keycloak tests flake mutate lint check-tools fmt-check vet tidy-check names vuln hooks \
 	install-betterleaks betterleaks-version allowlists allowlists-proof secrets-staged secrets-history
 
-qa: check-tools fmt-check vet lint tidy-check names allowlists allowlists-proof tests stack vuln
+qa: check-tools fmt-check vet lint tidy-check names vuln allowlists allowlists-proof tests stack
 
 fix: check-tools
 	$(LINT) fmt
 	$(LINT) run --fix
-	go fix -tags database,stack,keycloak ./...
+	go fix -tags $(TAGS) ./...
 	go mod tidy
 
 # Unit tests and the database tests of testdb, against the test product's own server.
@@ -72,7 +74,7 @@ fmt-check: check-tools
 	$(LINT) fmt --diff
 
 vet:
-	go vet -tags database,stack,keycloak ./...
+	go vet -tags $(TAGS) ./...
 
 tidy-check:
 	go mod tidy -diff
@@ -86,7 +88,7 @@ names:
 	@! git grep --untracked -il -e agent -- $(NAMED) ':!internal/selftest' ':!withdb/*_test.go' ':!testdb/*_test.go' || { echo "names: the files above name a product; describe it in a testdb.Product instead"; exit 1; }
 
 vuln:
-	go run $(GOVULNCHECK) -tags database,stack,keycloak ./...
+	go run $(GOVULNCHECK) -tags $(TAGS) ./...
 
 hooks:
 	git config core.hooksPath .githooks
