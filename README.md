@@ -96,20 +96,25 @@ toolchain (Makefile and `.github/workflows/ci.yml`).
 
 - **cleanup**: Runs. A run removes its Compose project (containers, network, volumes, locally built images) and its
   folder on every exit it makes itself: the command's end, a command that could not start, a failure before the
-  command, a failed start, INT and TERM; a failed removal keeps the folder for the next start to find. Not after a hard
-  kill: what the next start of the same product finds on the same Docker daemon, from the same machine and the same
-  temporary folder, it names with its removal commands; Docker objects made before the first container and folders
-  under another temporary folder are not found. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
+  command, a failed start, INT and TERM; each of these is checked for its containers, volumes, networks and built
+  images. A failed removal keeps the folder for the next start to find, names the commands that remove the run, and
+  answers at least 1 whatever the command's status. Not after a hard kill: what the next start of the same product
+  finds on the same Docker daemon, from the same machine and the same temporary folder, it names with its removal
+  commands; Docker objects made before the first container and folders under another temporary folder are not found.
+  Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`, `withdb/stack_test.go::failed removal`
 - **ownership**: A run changes only the project and folder it created; leftovers of other runs are reported, never
   removed. Shown across processes, since the package allows one run per process. Tests: `withdb/stack_test.go::TestRunnerRemovesWhatItStartedAndNothingElse`
 - **trust**: Settings. The command gets this run's settings only (its addresses, the DevTools address, passwords and
   certificate material); no inherited setting of another run of the product, no inherited Compose setting and no
   inherited variable the product refuses reaches it. Tests: `withdb/withdb_test.go::TestInheritedDropsRunnerSettingsComposeAndRefusedVariables`, `withdb/stack_test.go::the command's environment`
-- **trust**: Secrets. The login password and the server key are in no host file the module writes, in none of its
-  output, and in no server log line from provisioning, whatever logging flags a product gives the server. Tests: `withdb/stack_test.go::failed start, statements logged`
+- **trust**: Secrets. The run's passwords and the server key are in no file of the run's folder, in none of the
+  module's output (standard error, the services' logs of a failed run included), and in no server log line from
+  provisioning, whatever logging flags a product gives the server. Tests:
+  `withdb/stack_test.go::failed command, secrets kept out`, `withdb/stack_test.go::failed start, statements logged`
 - **trust**: Plaintext. Over TCP without TLS the server admits only the product's plaintext logins (every product login
   when it lists none), and only on the plaintext-prefix databases; every other connection needs TLS (the
-  administrator's socket inside the container is unchanged). Tests:
+  administrator's socket inside the container is unchanged). The plaintext relay (`NewForwarder`) refuses any other
+  database. Tests:
   `withdb/withdb_test.go::TestPlaintextRuleNamesItsLogins`,
   `testdb/testdb_database_test.go::TestPlaintextAdmitsOnlyTheListedLogins`
 - **trust**: Tokens. A stand-in token's protected header is exactly the members its caller stated plus `alg` (and the

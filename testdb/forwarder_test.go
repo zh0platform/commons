@@ -34,7 +34,10 @@ func TestRelayToAServerThatStoppedReadingEndsWithItsTest(t *testing.T) {
 	_, port, _ := net.SplitHostPort(server.Addr().String())
 
 	t.Run("owner", func(owner *testing.T) {
-		relay := NewForwarder(owner, &Database{server: Server{Host: "127.0.0.1", Port: port}})
+		relay, err := NewForwarder(owner, &Database{Name: PlaintextPrefix + "stalled", server: Server{Host: "127.0.0.1", Port: port}})
+		if err != nil {
+			owner.Fatal(err)
+		}
 		client, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(relay.Settings("x").Port)))
 		if err != nil {
 			owner.Fatal(err)

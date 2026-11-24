@@ -86,43 +86,48 @@ type Server struct {
 	Host, Port, CA, AdminPassword, LoginPassword string
 }
 
-// The suffixes of the variables that hand a Server to the command, after the product's Variables.
-var serverSuffixes = []string{"DB_HOST", "DB_PORT", "DB_CA", "DB_ADMIN_PASSWORD", "DB_LOGIN_PASSWORD"}
-
-func (s Server) values() []string {
-	return []string{s.Host, s.Port, s.CA, s.AdminPassword, s.LoginPassword}
+// serverFields pairs each field of the Server with the suffix, after the product's Variables, of the variable that
+// hands it to the command.
+var serverFields = []struct {
+	suffix string
+	field  func(*Server) *string
+}{
+	{"DB_HOST", func(s *Server) *string { return &s.Host }},
+	{"DB_PORT", func(s *Server) *string { return &s.Port }},
+	{"DB_CA", func(s *Server) *string { return &s.CA }},
+	{"DB_ADMIN_PASSWORD", func(s *Server) *string { return &s.AdminPassword }},
+	{"DB_LOGIN_PASSWORD", func(s *Server) *string { return &s.LoginPassword }},
 }
 
 // ServerVariables are the names under which a runner hands the Server to its command.
 func (p Product) ServerVariables() []string {
-	names := make([]string, len(serverSuffixes))
-	for i, suffix := range serverSuffixes {
-		names[i] = p.Variables + suffix
+	names := make([]string, len(serverFields))
+	for i, f := range serverFields {
+		names[i] = p.Variables + f.suffix
 	}
 	return names
 }
 
 // ServerEnviron is the Server as NAME=value entries for the command.
 func (p Product) ServerEnviron(s Server) []string {
-	values := s.values()
-	environ := make([]string, len(values))
-	for i, name := range p.ServerVariables() {
-		environ[i] = name + "=" + values[i]
+	environ := make([]string, len(serverFields))
+	for i, f := range serverFields {
+		environ[i] = p.Variables + f.suffix + "=" + *f.field(&s)
 	}
 	return environ
 }
 
 // server reads the Server the runner handed to this process; the error names the first missing variable.
 func (p Product) server() (Server, error) {
-	values := make([]string, len(serverSuffixes))
-	for i, name := range p.ServerVariables() {
-		value, ok := os.LookupEnv(name)
+	var s Server
+	for _, f := range serverFields {
+		value, ok := os.LookupEnv(p.Variables + f.suffix)
 		if !ok {
-			return Server{}, fmt.Errorf("%s is not set: run this through the product's withdb runner", name)
+			return Server{}, fmt.Errorf("%s is not set: run this through the product's withdb runner", p.Variables+f.suffix)
 		}
-		values[i] = value
+		*f.field(&s) = value
 	}
-	return Server{Host: values[0], Port: values[1], CA: values[2], AdminPassword: values[3], LoginPassword: values[4]}, nil
+	return s, nil
 }
 
 // Provision creates the product's logins, then its statements, then the template with its schema, as a deployment

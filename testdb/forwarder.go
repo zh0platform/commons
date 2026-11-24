@@ -3,6 +3,7 @@ package testdb
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -34,12 +35,15 @@ type Forwarder struct {
 }
 
 // NewForwarder listens until the test ends, when it closes every connection it accepted and waits for its relays to
-// end. The database must come from NewPlaintext.
-func NewForwarder(t testing.TB, db *Database) *Forwarder {
+// end. The relay speaks plaintext, so it refuses a database that did not come from NewPlaintext.
+func NewForwarder(t testing.TB, db *Database) (*Forwarder, error) {
 	t.Helper()
+	if !strings.HasPrefix(db.Name, PlaintextPrefix) {
+		return nil, fmt.Errorf("relay to %s refused: only a database from NewPlaintext is reachable without TLS", db.Name)
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	f := &Forwarder{db: db, listener: listener, open: map[net.Conn]struct{}{}}
 	f.wg.Go(f.accept)
@@ -53,7 +57,7 @@ func NewForwarder(t testing.TB, db *Database) *Forwarder {
 		f.mu.Unlock()
 		f.wg.Wait()
 	})
-	return f
+	return f, nil
 }
 
 // Settings connect a login through the forwarder in plaintext.
