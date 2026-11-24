@@ -99,6 +99,9 @@ func TestStandInServesAnAccessTokenUser(t *testing.T) {
 	for _, profile := range []string{"keycloak", "auth0"} {
 		t.Run(profile, func(t *testing.T) {
 			s := standin.Start(t, profile)
+			if s.Profile != profile {
+				t.Fatalf("Start(%s).Profile = %q", profile, s.Profile)
+			}
 			client, keys := trusting(t, s), s.Issuer+keySetPath[profile]
 			typed := map[string]any{"typ": "at+jwt"}
 			first := s.Token(t, typed, map[string]any{"tenant": "t-1", "exp": nil})
@@ -150,8 +153,9 @@ func TestStandInServesOnTheCallersMux(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Issuer != server.URL+"/realms/other" || s.TrustPEM != "" {
-		t.Fatalf("New = Issuer %q, TrustPEM %q, want the caller's issuer and no certificate", s.Issuer, s.TrustPEM)
+	if s.Profile != "keycloak" || s.Issuer != server.URL+"/realms/other" || s.TrustPEM != "" {
+		t.Fatalf("New = Profile %q, Issuer %q, TrustPEM %q, want keycloak, the caller's issuer and no certificate",
+			s.Profile, s.Issuer, s.TrustPEM)
 	}
 	token, err := s.Mint(map[string]any{}, []byte(`{"sub":"x"}`))
 	if err != nil {

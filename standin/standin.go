@@ -33,6 +33,8 @@ const (
 
 // StandIn is one stand-in's keys and key set.
 type StandIn struct {
+	// Profile is the profile the stand-in was made with, "keycloak" or "auth0"; the stand-in does not read it back.
+	Profile string
 	// Issuer is the issuer the stand-in was made for, the "iss" of Claims.
 	Issuer string
 	// TrustPEM is the certificate a client trusts to reach a stand-in made by Start; empty with New, whose caller owns
@@ -67,7 +69,7 @@ func New(profile, issuer string, mux *http.ServeMux) (*StandIn, error) {
 	case strings.HasSuffix(issuer, "/") != form.slash:
 		return nil, fmt.Errorf("stand-in issuer %q: a %s issuer %s", issuer, profile, form.slashRule)
 	}
-	s := &StandIn{Issuer: issuer, signers: map[string]*ecdsa.PrivateKey{}}
+	s := &StandIn{Profile: profile, Issuer: issuer, signers: map[string]*ecdsa.PrivateKey{}}
 	s.Rotate()
 	mux.HandleFunc(u.Path+form.keySet, s.keys)
 	return s, nil
