@@ -116,7 +116,7 @@ func TestDatabaseAndRelayEndWithTheirTest(t *testing.T) {
 	t.Run("owner", func(owner *testing.T) {
 		database := testdb.NewPlaintext(owner, product(owner))
 		name = database.Name
-		idle = dial(t, testdb.NewForwarder(owner, database)) // closed by the outer test, after the owner's cleanup
+		idle = dial(t, forwarder(owner, database)) // closed by the outer test, after the owner's cleanup
 	})
 	assertClosed(t, idle)
 	var exists bool
@@ -132,7 +132,7 @@ func TestDatabaseAndRelayEndWithTheirTest(t *testing.T) {
 // through the same relay goes on.
 func TestRelayClosesAConnectionWhoseMessageExceedsTheCap(t *testing.T) {
 	database := testdb.NewPlaintext(t, product(t))
-	relay := testdb.NewForwarder(t, database)
+	relay := forwarder(t, database)
 	oversized := dial(t, relay)
 	header := binary.BigEndian.AppendUint32(nil, 1<<20+1)
 	if _, err := oversized.Write(header); err != nil {
@@ -174,6 +174,9 @@ func TestPlaintextAdmitsOnlyTheListedLogins(t *testing.T) {
 		}
 	}
 	plaintext.Connect(t, selftest.RecoveryLogin, plaintext.LoginsPassword())
+	if _, err := testdb.NewForwarder(t, ordinary); err == nil {
+		t.Errorf("NewForwarder(%s) = nil error, want a refusal: a relay is plaintext, so only a plaintext database", ordinary.Name)
+	}
 }
 
 // An arm that skips one completion lets the first tagged statement through, whichever connection completes it, and
@@ -185,7 +188,7 @@ func TestRelayDropsTheAnswerAfterTheSkippedCompletions(t *testing.T) {
 	if _, err := database.Admin(t).Exec(ctx, "CREATE TABLE public.relayed (n int); GRANT INSERT ON public.relayed TO "+selftest.RuntimeLogin); err != nil {
 		t.Fatal(err)
 	}
-	relay := testdb.NewForwarder(t, database)
+	relay := forwarder(t, database)
 	first, err := plainConnect(relay.Settings(selftest.RuntimeLogin))
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +213,92 @@ func TestRelayDropsTheAnswerAfterTheSkippedCompletions(t *testing.T) {
 	if err := database.Admin(t).QueryRow(ctx, "SELECT count(*) FROM public.relayed").Scan(&rows); err != nil || rows != 2 {
 		t.Fatalf("rows = %d, %v, want both inserts committed", rows, err)
 	}
+}
+
+// A relay counts the commits sent through it; once armed, it withholds every answer after the next query and leaves
+// the connection open, so the client waits until its own deadline.
+func TestRelayCountsCommitsThenStallsWhenArmed(t *testing.T) {
+	relay := forwarder(t, testdb.NewPlaintext(t, product(t)))
+	conn, err := plainConnect(relay.Settings(selftest.RuntimeLogin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+	ctx := context.Background()
+	for range 2 {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.Exec(ctx, "SELECT 1"); err != nil || relay.Commits() != 2 {
+		t.Fatalf("after two commits and a query: Commits() = %d, %v; want 2", relay.Commits(), err)
+	}
+	relay.StallAfterNextQuery()
+	stalled, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if _, err := conn.Exec(stalled, "SELECT 1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a query after the arm = %v, want the client's own deadline, not an answer or a closed connection", err)
+	}
+}
+
+// WaitForLockWait returns once a connection of the named application waits on a lock.
+func TestWaitForLockWaitSeesAWaitingConnection(t *testing.T) {
+	database := testdb.New(t, product(t))
+	ctx := context.Background()
+	holder, waiter := database.Admin(t), database.Admin(t)
+	if _, err := holder.Exec(ctx, "CREATE TABLE public.locked (n int)"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "LOCK TABLE public.locked"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waiter.Exec(ctx, "SET application_name = 'waiter'"); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() {
+		_, err := waiter.Exec(ctx, "BEGIN; LOCK TABLE public.locked; ROLLBACK")
+		waited <- err
+	}()
+	database.WaitForLockWait(t, "waiter", 1, 10*time.Second)
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-waited; err != nil {
+		t.Errorf("the waiter's lock after the holder ended: %v", err)
+	}
+}
+
+// A command that is not a test gets the run's template on the run's server, named as the product names it.
+func TestTemplateDatabaseIsTheRunsTemplate(t *testing.T) {
+	p := product(t)
+	template, err := testdb.TemplateDatabase(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, test := template.Settings(selftest.MigrateLogin), testdb.New(t, p).Settings(selftest.MigrateLogin)
+	if template.Name != p.Template || settings.Database != p.Template || settings.Host != test.Host || settings.Port != test.Port {
+		t.Errorf("TemplateDatabase = %s at %s:%d, want %s on the run's server (%s:%d)", template.Name, settings.Host,
+			settings.Port, p.Template, test.Host, test.Port)
+	}
+}
+
+// forwarder is a relay to a plaintext database.
+func forwarder(t *testing.T, database *testdb.Database) *testdb.Forwarder {
+	t.Helper()
+	relay, err := testdb.NewForwarder(t, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relay
 }
 
 // plainConnect connects without TLS, through a relay or straight to a database.

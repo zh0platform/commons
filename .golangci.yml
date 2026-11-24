@@ -48,6 +48,11 @@ linters:
           - gosec
         path: (^keycloak/keycloak\.go$|_test\.go$)
         text: G304
+      # The stack test's stand-in for docker is a command, so it needs its execute bit.
+      - linters:
+          - gosec
+        path: ^withdb/stack_test\.go$
+        text: G306
 
 formatters:
   enable:

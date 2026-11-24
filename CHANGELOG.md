@@ -12,6 +12,8 @@ Breaking, for every product on the module (bff follows in its switch; the agent 
   `withdb.Product`; `withdb.Product.Check` checks the database fields (through `testdb.Product.Check`), then its own.
   Migration: keep the database fields in a `testdb.Product` for the tests, and build
   `withdb.Product{Product: <it>, Project: …, Root: …}` in the runner.
+- `testdb`: `NewForwarder` returns `(*Forwarder, error)` and refuses a database that did not come from
+  `NewPlaintext`, since its relay speaks plaintext. A product's wrapper fails its test on the error.
 
 ## v0.3.0
 
