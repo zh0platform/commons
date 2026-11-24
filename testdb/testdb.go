@@ -280,8 +280,9 @@ func (d *Database) drop(t testing.TB) {
 }
 
 // RestoreLikeInfra dumps this database and restores it the way infrastructure's restore does: pg_dump in custom
-// format, a target created closed from template0 (CONNECT for the given logins only), pg_restore in one transaction
-// with owners and grants. Both programs run inside the server's container. The copy is dropped when the test ends.
+// format without the rows of unlogged tables, a target created closed from template0 (CONNECT for the given logins
+// only), pg_restore in one transaction with owners and grants. The programs run inside the server's container. The
+// copy is dropped when the test ends.
 func (d *Database) RestoreLikeInfra(t testing.TB, logins ...string) *Database {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -294,24 +295,35 @@ func (d *Database) RestoreLikeInfra(t testing.TB, logins ...string) *Database {
 	target := &Database{Name: "restored_" + d.Name, product: d.product, server: d.server}
 	dump := "/tmp/" + d.Name + ".dump"
 	t.Cleanup(func() { target.drop(t) })
+	if err := runOnServer(ctx, conn, "pg_dump --format=custom --no-unlogged-table-data --file="+dump+" --dbname="+d.Name); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
 	statements := []string{
-		"COPY (SELECT 1) TO PROGRAM 'pg_dump --format=custom --file=" + dump + " --dbname=" + d.Name + "'",
 		"CREATE DATABASE " + target.Name + " OWNER " + admin + " TEMPLATE template0 ALLOW_CONNECTIONS false",
 		"REVOKE ALL ON DATABASE " + target.Name + " FROM PUBLIC",
 		"GRANT CONNECT ON DATABASE " + target.Name + " TO " + strings.Join(logins, ", "),
 		"ALTER DATABASE " + target.Name + " ALLOW_CONNECTIONS true",
-		"COPY (SELECT 1) TO PROGRAM 'pg_restore --single-transaction --exit-on-error --dbname=" + target.Name + " " + dump + "'",
 	}
 	for _, statement := range statements {
 		if _, err := conn.Exec(ctx, statement); err != nil {
 			t.Fatalf("restore: %v", err)
 		}
 	}
-	// The program reads the copied row first: rm alone can exit before the server writes it, a broken pipe.
-	if _, err := conn.Exec(ctx, "COPY (SELECT 1) TO PROGRAM 'cat >/dev/null; rm -f "+dump+"'"); err != nil {
+	if err := runOnServer(ctx, conn, "pg_restore --single-transaction --exit-on-error --dbname="+target.Name+" "+dump); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := runOnServer(ctx, conn, "rm -f "+dump); err != nil {
 		t.Fatalf("remove the dump: %v", err)
 	}
 	return target
+}
+
+// runOnServer runs program inside the server's container, through COPY TO PROGRAM as the server's administrator. The
+// program gets no rows: one that exits without reading its input could otherwise fail the COPY with a broken pipe, so
+// its exit status alone decides.
+func runOnServer(ctx context.Context, conn *pgx.Conn, program string) error {
+	_, err := conn.Exec(ctx, "COPY (SELECT WHERE false) TO PROGRAM '"+program+"'")
+	return err
 }
 
 // WaitForLockWait waits until at least waiters connections of the given application name wait on a lock here. Only

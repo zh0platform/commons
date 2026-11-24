@@ -66,21 +66,45 @@ func TestProvisioningMatchesTheProductsDescription(t *testing.T) {
 	}
 }
 
-// The restored copy holds the data and lets only the given logins in.
+// The restored copy holds the data, except an unlogged table's rows as infrastructure's dump leaves them out, and
+// lets only the given logins in.
 func TestRestoreLikeInfraClosesTheCopyToTheGivenLogins(t *testing.T) {
-	restored := testdb.NewMigrated(t, product(t)).RestoreLikeInfra(t, selftest.MigrateLogin)
-	var table, runtimeConnects bool
-	if err := restored.Admin(t).QueryRow(context.Background(), `SELECT to_regclass('agent.marker') IS NOT NULL,
-		has_database_privilege($1, current_database(), 'CONNECT')`, selftest.RuntimeLogin).Scan(&table, &runtimeConnects); err != nil {
+	source := testdb.NewMigrated(t, product(t))
+	if _, err := source.Admin(t).Exec(context.Background(), `INSERT INTO agent.marker VALUES (1);
+		CREATE UNLOGGED TABLE agent.scratch (id int); INSERT INTO agent.scratch VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
-	if !table || runtimeConnects {
-		t.Errorf("restored copy: table %v, CONNECT for the runtime login %v; want true, false", table, runtimeConnects)
+	restored := source.RestoreLikeInfra(t, selftest.MigrateLogin)
+	var markers, scratch int
+	var runtimeConnects bool
+	if err := restored.Admin(t).QueryRow(context.Background(), `SELECT (SELECT count(*) FROM agent.marker),
+		(SELECT count(*) FROM agent.scratch), has_database_privilege($1, current_database(), 'CONNECT')`,
+		selftest.RuntimeLogin).Scan(&markers, &scratch, &runtimeConnects); err != nil {
+		t.Fatal(err)
+	}
+	if markers != 1 || scratch != 0 || runtimeConnects {
+		t.Errorf("restored copy: %d marker rows, %d unlogged rows, CONNECT for the runtime login %v; want 1, 0, false",
+			markers, scratch, runtimeConnects)
 	}
 }
 
-// A test's database and relay end with it: the database is dropped and a connection the relay accepted is closed,
-// even one that never sent a byte.
+// A program on the server is judged by its exit status alone: it gets no rows, so one that never reads its input
+// passes and one that fails is still reported. The reason: a row a program does not read breaks the pipe, and a row
+// larger than a pipe's buffer does so whatever the timing.
+func TestServerProgramsAreJudgedByTheirExitStatus(t *testing.T) {
+	conn := testdb.New(t, product(t)).Admin(t)
+	ctx := context.Background()
+	if err := testdb.RunOnServer(ctx, conn, "test $(wc -c) -eq 0"); err != nil {
+		t.Errorf("RunOnServer(a program that fails on any input byte) = %v, want nil", err)
+	}
+	if err := testdb.RunOnServer(ctx, conn, "false"); err == nil {
+		t.Error("RunOnServer(false) = nil, want its failure")
+	}
+	if _, err := conn.Exec(ctx, "COPY (SELECT repeat('x', 1048576)) TO PROGRAM 'true'"); err == nil {
+		t.Error("COPY of a 1 MB row to a program that never reads = nil, want a broken pipe")
+	}
+}
+
 func TestDatabaseAndRelayEndWithTheirTest(t *testing.T) {
 	observer := testdb.New(t, product(t)).Admin(t)
 	var name string
