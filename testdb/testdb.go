@@ -121,9 +121,10 @@ func (p Product) ServerEnviron(s Server) []string {
 func (p Product) server() (Server, error) {
 	var s Server
 	for _, f := range serverFields {
-		value, ok := os.LookupEnv(p.Variables + f.suffix)
+		name := p.Variables + f.suffix
+		value, ok := os.LookupEnv(name)
 		if !ok {
-			return Server{}, fmt.Errorf("%s is not set: run this through the product's withdb runner", p.Variables+f.suffix)
+			return Server{}, fmt.Errorf("%s is not set: run this through the product's withdb runner", name)
 		}
 		*f.field(&s) = value
 	}

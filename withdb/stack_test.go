@@ -394,13 +394,12 @@ func assertGone(t *testing.T, r *run) {
 	if folder := r.folder(); folder != "" {
 		t.Errorf("the run left its folder %s", folder)
 	}
-	// Compose lists a project by its containers: a volume, network or built image left without one is checked by the
-	// project label Compose gives it, an image by its name, which starts with the project's.
+	// Compose lists a project by its containers: a volume, network or built image left without one is found by the
+	// project label Compose gives it, and named after the project.
 	left := docker(t, "compose", "ls", "--all", "--quiet")
-	for _, kind := range []string{"volume", "network"} {
-		left = append(left, docker(t, kind, "ls", "--format", "{{.Name}}", "--filter", "label=com.docker.compose.project")...)
+	for _, kind := range []struct{ object, name string }{{"volume", "{{.Name}}"}, {"network", "{{.Name}}"}, {"image", "{{.Repository}}"}} {
+		left = append(left, docker(t, kind.object, "ls", "--format", kind.name, "--filter", "label=com.docker.compose.project")...)
 	}
-	left = append(left, docker(t, "image", "ls", "--format", "{{.Repository}}", "--filter", "label=com.docker.compose.project")...)
 	for _, name := range left {
 		if strings.HasPrefix(name, prefix) && strings.Contains(name, r.marker()) {
 			t.Errorf("the run left %s", name)
@@ -411,13 +410,13 @@ func assertGone(t *testing.T, r *run) {
 // failingDown is a folder holding a docker that fails only Compose's down and passes everything else to the real one.
 func failingDown(t *testing.T) string {
 	t.Helper()
-	real, err := exec.LookPath("docker")
+	dockerPath, err := exec.LookPath("docker")
 	if err != nil {
 		t.Fatal(err)
 	}
 	folder := t.TempDir()
 	// test-policy: the real docker cannot be made to fail one removal on demand; this stand-in fails only "down".
-	script := "#!/bin/sh\ncase \" $* \" in *\" down \"*) echo 'down refused' >&2; exit 1;; esac\nexec '" + real + "' \"$@\"\n"
+	script := "#!/bin/sh\ncase \" $* \" in *\" down \"*) echo 'down refused' >&2; exit 1;; esac\nexec '" + dockerPath + "' \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(folder, "docker"), []byte(script), 0o500); err != nil {
 		t.Fatal(err)
 	}

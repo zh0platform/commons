@@ -284,10 +284,10 @@ func TestTemplateDatabaseIsTheRunsTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings := template.Settings(selftest.MigrateLogin)
-	if template.Name != p.Template || settings.Database != p.Template ||
-		settings.Host != os.Getenv(p.Variables+"DB_HOST") || strconv.Itoa(settings.Port) != os.Getenv(p.Variables+"DB_PORT") {
-		t.Errorf("TemplateDatabase = %s at %s:%d, want %s on the run's server", template.Name, settings.Host, settings.Port, p.Template)
+	settings, test := template.Settings(selftest.MigrateLogin), testdb.New(t, p).Settings(selftest.MigrateLogin)
+	if template.Name != p.Template || settings.Database != p.Template || settings.Host != test.Host || settings.Port != test.Port {
+		t.Errorf("TemplateDatabase = %s at %s:%d, want %s on the run's server (%s:%d)", template.Name, settings.Host,
+			settings.Port, p.Template, test.Host, test.Port)
 	}
 }
 
