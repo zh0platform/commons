@@ -124,5 +124,5 @@ toolchain (Makefile and `.github/workflows/ci.yml`).
   restore because it did not read its input; a program that fails fails the test, naming it. Tests:
   `testdb/testdb_database_test.go::TestServerProgramsAreJudgedByTheirExitStatus`
 - **trust**: Secrets in commits. A push to main or a pull request fails at the Secrets workflow when a commit since
-  `SCAN_SINCE` adds a secret the scanner recognises, in an added, a modified or a merge commit's file; the finding
-  prints its rule, file:line and commit. Tests: `scripts/check-allowlists.sh::probe`
+  `SCAN_SINCE` adds a secret the scanner recognises, in an added, a modified or a merge commit's file. Tests:
+  `scripts/check-allowlists.sh::probe`

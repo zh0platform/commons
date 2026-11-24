@@ -2,8 +2,7 @@
 # (the cooldown never delays them), grouped the same way; majors one by one for a person. Group pull requests merge by
 # themselves once the required checks are green (.github/workflows/dependabot-merge.yml matches the group names).
 # Keycloak stays out of the groups: each of its updates, patches included, waits for a person, since a minor can carry
-# database migrations. Not seen here, checked by hand at each release (README, "Releases"): gomutants, golangci-lint,
-# Betterleaks, govulncheck and the Go toolchain.
+# database migrations. The tools Dependabot does not see are checked by hand at each release (README, "Releases").
 version: 2
 updates:
   - package-ecosystem: gomod
