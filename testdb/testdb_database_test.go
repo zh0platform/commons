@@ -27,10 +27,10 @@ func product(t *testing.T) testdb.Product {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return selftest.Product(root)
+	return selftest.Product(root).Product
 }
 
-// The second user's provisioning, as its infrastructure does it: its four logins, the one that bypasses row
+// The test product's provisioning, as a deployment does it: its four logins, the one that bypasses row
 // security, the role without login granted with SET and without INHERIT, its schema owned by its migration login, and
 // test databases closed to everyone but its logins.
 func TestProvisioningMatchesTheProductsDescription(t *testing.T) {
@@ -43,7 +43,7 @@ func TestProvisioningMatchesTheProductsDescription(t *testing.T) {
 		(SELECT rolbypassrls FROM pg_roles WHERE rolname = $1),
 		(SELECT rolcanlogin FROM pg_roles WHERE rolname = $2),
 		m.inherit_option, m.set_option,
-		(SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'agent')
+		(SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'shop')
 		FROM pg_auth_members m WHERE m.roleid = $2::regrole AND m.member = $3::regrole`,
 		selftest.RecoveryLogin, selftest.SchedulerRole, selftest.MigrateLogin).
 		Scan(&bypass, &schedulerLogin, &inherit, &set, &owner); err != nil {
@@ -54,7 +54,7 @@ func TestProvisioningMatchesTheProductsDescription(t *testing.T) {
 			bypass, schedulerLogin, inherit, set, owner, selftest.MigrateLogin)
 	}
 	var migrated, publicConnects bool
-	if err := admin.QueryRow(ctx, `SELECT to_regclass('agent.marker') IS NOT NULL,
+	if err := admin.QueryRow(ctx, `SELECT to_regclass('shop.marker') IS NOT NULL,
 		has_database_privilege('public', current_database(), 'CONNECT')`).Scan(&migrated, &publicConnects); err != nil {
 		t.Fatal(err)
 	}
@@ -67,19 +67,19 @@ func TestProvisioningMatchesTheProductsDescription(t *testing.T) {
 	}
 }
 
-// The restored copy holds the data, except an unlogged table's rows as infrastructure's dump leaves them out, and
+// The restored copy holds the data, except an unlogged table's rows as a deployment's dump leaves them out, and
 // lets only the given logins in.
 func TestRestoreLikeInfraClosesTheCopyToTheGivenLogins(t *testing.T) {
 	source := testdb.NewMigrated(t, product(t))
-	if _, err := source.Admin(t).Exec(context.Background(), `INSERT INTO agent.marker VALUES (1);
-		CREATE UNLOGGED TABLE agent.scratch (id int); INSERT INTO agent.scratch VALUES (1)`); err != nil {
+	if _, err := source.Admin(t).Exec(context.Background(), `INSERT INTO shop.marker VALUES (1);
+		CREATE UNLOGGED TABLE shop.scratch (id int); INSERT INTO shop.scratch VALUES (1)`); err != nil {
 		t.Fatal(err)
 	}
 	restored := source.RestoreLikeInfra(t, selftest.MigrateLogin)
 	var markers, scratch int
 	var migrateConnects, runtimeConnects bool
-	if err := restored.Admin(t).QueryRow(context.Background(), `SELECT (SELECT count(*) FROM agent.marker),
-		(SELECT count(*) FROM agent.scratch), has_database_privilege($1, current_database(), 'CONNECT'),
+	if err := restored.Admin(t).QueryRow(context.Background(), `SELECT (SELECT count(*) FROM shop.marker),
+		(SELECT count(*) FROM shop.scratch), has_database_privilege($1, current_database(), 'CONNECT'),
 		has_database_privilege($2, current_database(), 'CONNECT')`, selftest.MigrateLogin, selftest.RuntimeLogin).
 		Scan(&markers, &scratch, &migrateConnects, &runtimeConnects); err != nil {
 		t.Fatal(err)

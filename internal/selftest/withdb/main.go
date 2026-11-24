@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/zh0platform/commons/internal/selftest"
-	"github.com/zh0platform/commons/testdb"
 	"github.com/zh0platform/commons/withdb"
 )
 
@@ -29,7 +28,7 @@ func main() {
 	os.Exit(withdb.Run(product, command))
 }
 
-func parseArgs(args []string, product *testdb.Product) ([]string, error) {
+func parseArgs(args []string, product *withdb.Product) ([]string, error) {
 	for len(args) > 0 {
 		switch {
 		case args[0] == "--keycloak":

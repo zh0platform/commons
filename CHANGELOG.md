@@ -3,6 +3,16 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
+## v0.4.0
+
+Breaking, for every product on the module (bff follows in its switch; the agent and Membership in their own stories):
+
+- The runner's fields left `testdb.Product` for the new `withdb.Product`, which embeds a `testdb.Product`: `Project`,
+  `Names`, `Refused`, `Root`, `Realms`, `Files`, `Browser` and `Quiet` moved unchanged. `withdb.Run` takes a
+  `withdb.Product`; `withdb.Product.Check` checks the database fields (through `testdb.Product.Check`), then its own.
+  Migration: keep the database fields in a `testdb.Product` for the tests, and build
+  `withdb.Product{Product: <it>, Project: …, Root: …}` in the runner.
+
 ## v0.3.0
 
 Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.3):

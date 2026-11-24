@@ -51,7 +51,7 @@ func TestRunnerRemovesWhatItStartedAndNothingElse(t *testing.T) {
 // cases runs each boundary in a run of its own, in parallel: each has its own process ID, project and folder.
 func cases(t *testing.T, runner, temp string) {
 	statementLog := filepath.Join(t.TempDir(), "statements.yaml")
-	if err := os.WriteFile(statementLog, []byte("services:\n  postgres:\n    environment:\n      AGENTTEST_PG_FLAGS: -c log_statement=all -c log_min_duration_statement=0 -c log_transaction_sample_rate=1\n"), 0o600); err != nil {
+	if err := os.WriteFile(statementLog, []byte("services:\n  postgres:\n    environment:\n      SHOPTEST_PG_FLAGS: -c log_statement=all -c log_min_duration_statement=0 -c log_transaction_sample_rate=1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -74,13 +74,13 @@ func cases(t *testing.T, runner, temp string) {
 			signal: func(t *testing.T, r *run) { r.waitFor(t, "ready"); r.signal(t, syscall.SIGTERM) }},
 		{name: "interrupt during the command", args: []string{"--", "sh", "-c", "echo ready; exec sleep 600"}, status: 1,
 			signal: func(t *testing.T, r *run) { r.waitFor(t, "ready"); r.signal(t, syscall.SIGINT) }},
-		// A browser without any product file (the agent's shape): the command gets DevTools' address and no Compose
-		// variable, and DevTools answers through that address at once.
+		// A browser without any product file: the command gets DevTools' address and no Compose variable, and DevTools
+		// answers through that address at once.
 		{name: "browser without product files", status: 0, args: []string{"--browser", "--", "sh", "-c",
-			`test -z "$COMPOSE_FILE" && test -z "$AGENTTEST_ADMIN_PASSWORD" && curl -fsS --max-time 10 "http://$AGENTTEST_DEVTOOLS/json/version" | grep -q '"Browser"'`}},
+			`test -z "$COMPOSE_FILE" && test -z "$SHOPTEST_ADMIN_PASSWORD" && curl -fsS --max-time 10 "http://$SHOPTEST_DEVTOOLS/json/version" | grep -q '"Browser"'`}},
 		{name: "failed start, statements logged", status: 1,
-			args: []string{"--compose", statementLog, "--login", "agent_migrate", "--", "true"},
-			output: []string{"setup failed: provisioning", `role "agent_migrate" already exists`,
+			args: []string{"--compose", statementLog, "--login", "shop_migrate", "--", "true"},
+			output: []string{"setup failed: provisioning", `role "shop_migrate" already exists`,
 				"database system is ready to accept connections"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,19 +112,19 @@ func cases(t *testing.T, runner, temp string) {
 	// run's own settings and a setting the runner does not manage do.
 	t.Run("the command's environment", func(t *testing.T) {
 		t.Parallel()
-		inherited := []string{"AGENT_TYPO=1", "AGENTTEST_DB_HOST=another-run", "AGENTTEST_DEVTOOLS=another-run", "AGENTTEST_PG_FLAGS=-c fsync=on"}
+		inherited := []string{"SHOP_TYPO=1", "SHOPTEST_DB_HOST=another-run", "SHOPTEST_DEVTOOLS=another-run", "SHOPTEST_PG_FLAGS=-c fsync=on"}
 		r := start(t, runner, temp, inherited, "--", "env")
 		status := r.wait(t)
 		if status != 0 {
 			t.Fatalf("exit %d:\n%s", status, r.output())
 		}
 		environment := strings.Join(r.stdout(t), "\n") + "\n"
-		for _, absent := range []string{"AGENT_TYPO=", "AGENTTEST_DB_HOST=another-run", "AGENTTEST_DEVTOOLS="} {
+		for _, absent := range []string{"SHOP_TYPO=", "SHOPTEST_DB_HOST=another-run", "SHOPTEST_DEVTOOLS="} {
 			if strings.Contains(environment, absent) {
 				t.Errorf("the command's environment holds %s", absent)
 			}
 		}
-		for _, present := range []string{"AGENTTEST_PG_FLAGS=-c fsync=on\n", "AGENTTEST_DB_HOST=", "AGENTTEST_DB_CA=-----BEGIN"} {
+		for _, present := range []string{"SHOPTEST_PG_FLAGS=-c fsync=on\n", "SHOPTEST_DB_HOST=", "SHOPTEST_DB_CA=-----BEGIN"} {
 			if !strings.Contains(environment, present) {
 				t.Errorf("the command's environment lacks %s", present)
 			}

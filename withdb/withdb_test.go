@@ -1,4 +1,4 @@
-package withdb
+package withdb_test
 
 import (
 	"io"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/zh0platform/commons/internal/selftest"
 	"github.com/zh0platform/commons/testdb"
+	"github.com/zh0platform/commons/withdb"
 )
 
 // A description a stack cannot be built from, or an empty command, is refused before the stack, with status 1 and its
@@ -18,7 +19,7 @@ func TestRunRefusesBeforeTheStack(t *testing.T) {
 	broken := product
 	broken.Project = "Not-A-Prefix"
 	for name, c := range map[string]struct {
-		product testdb.Product
+		product withdb.Product
 		command []string
 		printed string
 	}{
@@ -26,7 +27,7 @@ func TestRunRefusesBeforeTheStack(t *testing.T) {
 		"an empty command":  {product, nil, "withdb: setup failed: no command to run\n"},
 	} {
 		var status int
-		printed := stderrOf(t, func() { status = Run(c.product, c.command) })
+		printed := stderrOf(t, func() { status = withdb.Run(c.product, c.command) })
 		if status != 1 || !strings.HasPrefix(printed, c.printed) || strings.Count(printed, "\n") != 1 {
 			t.Errorf("Run(%s) = %d, printed %q; want 1 and one line starting %q", name, status, printed, c.printed)
 		}
@@ -59,7 +60,7 @@ func TestPlaintextRuleNamesItsLogins(t *testing.T) {
 	product := selftest.Product(t.TempDir())
 	product.PlaintextLogins = nil
 	want := `hostnossl "/^` + testdb.PlaintextPrefix + `" ` + strings.Join(product.Logins, ",") + " 0.0.0.0/0 scram-sha-256"
-	rules := hba(product)
+	rules := withdb.HBA(product)
 	lines := strings.Split(rules, "\n")
 	if !slices.Contains(lines, want) || strings.Count(rules, "hostnossl") != 1 || !slices.Contains(lines, "local all "+testdb.Administrator+" trust") {
 		t.Errorf("hba(no plaintext logins) = %q, want the one plaintext rule %q and the administrator's socket", rules, want)
@@ -68,23 +69,28 @@ func TestPlaintextRuleNamesItsLogins(t *testing.T) {
 
 // A shell that ran another run of the product, or exported its settings or Compose's own, must not point this run's
 // processes at that run's servers or change which services Compose starts; a setting the runner does not manage
-// passes through.
+// passes through. Every name the runner sets is checked, so one added without the filter fails here.
 func TestInheritedDropsRunnerSettingsComposeAndRefusedVariables(t *testing.T) {
 	product := selftest.Product(t.TempDir())
-	for _, name := range []string{
-		"AGENTTEST_DB_HOST", "AGENTTEST_SERVER_KEY", "AGENTTEST_ROOT", "KEYCLOAK_TEST_URL", "KEYCLOAK_REALMS",
-		"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "AGENT_TYPO", "AGENTTEST_DEVTOOLS",
-	} {
+	names := slices.Concat(product.ServerVariables(), withdb.RunnerVariableNames(product),
+		[]string{"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "SHOP_TYPO"})
+	for _, name := range []string{"SHOPTEST_DB_CA", "SHOPTEST_ADMIN_PASSWORD", "SHOPTEST_SERVER_CERT", "SHOPTEST_SERVER_SPKI",
+		"SHOPTEST_PG_HBA", "SHOPTEST_DEVTOOLS", "KEYCLOAK_TEST_URL", "KEYCLOAK_REALMS"} {
+		if !slices.Contains(names, name) {
+			t.Fatalf("the runner's names %v lack %s", names, name)
+		}
+	}
+	for _, name := range names {
 		t.Setenv(name, "another-run")
 	}
-	t.Setenv("AGENTTEST_PG_FLAGS", "-c fsync=on")
-	environment := inherited(product)
+	t.Setenv("SHOPTEST_PG_FLAGS", "-c fsync=on")
+	environment := withdb.Inherited(product)
 	for _, entry := range environment {
 		if strings.HasSuffix(entry, "=another-run") {
 			t.Errorf("inherited(product) keeps %s", entry)
 		}
 	}
-	if !slices.Contains(environment, "AGENTTEST_PG_FLAGS=-c fsync=on") {
-		t.Error("inherited(product) lost AGENTTEST_PG_FLAGS, a setting the runner does not manage")
+	if !slices.Contains(environment, "SHOPTEST_PG_FLAGS=-c fsync=on") {
+		t.Error("inherited(product) lost SHOPTEST_PG_FLAGS, a setting the runner does not manage")
 	}
 }
