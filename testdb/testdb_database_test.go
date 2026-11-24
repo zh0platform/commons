@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,8 +98,8 @@ func TestServerProgramsAreJudgedByTheirExitStatus(t *testing.T) {
 	if err := testdb.RunOnServer(ctx, conn, "test $(wc -c) -eq 0"); err != nil {
 		t.Errorf("RunOnServer(a program that fails on any input byte) = %v, want nil", err)
 	}
-	if err := testdb.RunOnServer(ctx, conn, "false"); err == nil {
-		t.Error("RunOnServer(false) = nil, want its failure")
+	if err := testdb.RunOnServer(ctx, conn, "false"); err == nil || !strings.Contains(err.Error(), `"false"`) {
+		t.Errorf("RunOnServer(false) = %v, want its failure naming the program", err)
 	}
 	if _, err := conn.Exec(ctx, "COPY (SELECT repeat('x', 1048576)) TO PROGRAM 'true'"); err == nil {
 		t.Error("COPY of a 1 MB row to a program that never reads = nil, want a broken pipe")

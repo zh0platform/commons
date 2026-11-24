@@ -120,6 +120,9 @@ toolchain (Makefile and `.github/workflows/ci.yml`).
   connection the relay accepted is closed, also one blocked writing to a server that stopped reading. Tests:
   `testdb/testdb_database_test.go::TestDatabaseAndRelayEndWithTheirTest`,
   `testdb/forwarder_test.go::TestRelayToAServerThatStoppedReadingEndsWithItsTest`
-- **error mapping**: Restore programs. `RestoreLikeInfra`'s server-side programs get no rows, so one that exits without
-  reading its input cannot fail the restore; a program that fails fails the test, naming it. Tests:
+- **error mapping**: Restore programs. `RestoreLikeInfra`'s server-side programs get no rows, so none can fail the
+  restore because it did not read its input; a program that fails fails the test, naming it. Tests:
   `testdb/testdb_database_test.go::TestServerProgramsAreJudgedByTheirExitStatus`
+- **trust**: Secrets in commits. A push to main or a pull request fails at the Secrets workflow when a commit since
+  `SCAN_SINCE` adds a secret the scanner recognises, in an added, a modified or a merge commit's file; the finding
+  prints its rule, file:line and commit. Tests: `scripts/check-allowlists.sh::probe`
