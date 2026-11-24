@@ -1,4 +1,4 @@
-module git.kloudbox.de/commons/commons
+module github.com/zh0platform/commons
 
 go 1.27
 

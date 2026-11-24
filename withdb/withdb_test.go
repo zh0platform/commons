@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.kloudbox.de/commons/commons/internal/selftest"
-	"git.kloudbox.de/commons/commons/testdb"
+	"github.com/zh0platform/commons/internal/selftest"
+	"github.com/zh0platform/commons/testdb"
 )
 
 // A description a stack cannot be built from, or an empty command, is refused before the stack, with status 1 and its

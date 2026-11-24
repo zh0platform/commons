@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.kloudbox.de/commons/commons/testdb"
+	"github.com/zh0platform/commons/testdb"
 )
 
 // The logins and the role the test product provisions.

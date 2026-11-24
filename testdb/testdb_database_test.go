@@ -16,8 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"git.kloudbox.de/commons/commons/internal/selftest"
-	"git.kloudbox.de/commons/commons/testdb"
+	"github.com/zh0platform/commons/internal/selftest"
+	"github.com/zh0platform/commons/testdb"
 )
 
 func product(t *testing.T) testdb.Product {

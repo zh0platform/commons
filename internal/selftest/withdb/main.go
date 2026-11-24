@@ -9,9 +9,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.kloudbox.de/commons/commons/internal/selftest"
-	"git.kloudbox.de/commons/commons/testdb"
-	"git.kloudbox.de/commons/commons/withdb"
+	"github.com/zh0platform/commons/internal/selftest"
+	"github.com/zh0platform/commons/testdb"
+	"github.com/zh0platform/commons/withdb"
 )
 
 const usage = "usage: go run ./internal/selftest/withdb [--keycloak] [--browser] [--quiet] [--compose <file>]... [--login <name>]... -- <command> [args...]"

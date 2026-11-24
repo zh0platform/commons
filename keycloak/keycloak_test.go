@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"testing"
 
-	"git.kloudbox.de/commons/commons/keycloak"
+	"github.com/zh0platform/commons/keycloak"
 )
 
 // The module's pinned Keycloak starts with a realm file, serves the run's certificate and signs a user in through its

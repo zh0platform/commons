@@ -20,7 +20,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"git.kloudbox.de/commons/commons/standin"
+	"github.com/zh0platform/commons/standin"
 )
 
 // keySetPath is where each profile serves its key set below the issuer, as a verifier derives it.

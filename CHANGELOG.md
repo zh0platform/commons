@@ -3,6 +3,29 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
+## v0.3.0
+
+Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.3):
+
+- The module path is `github.com/zh0platform/commons`: a public repository, fetched through proxy.golang.org with Go's
+  default settings, with no `GOPRIVATE`, token or integration. A product changes its import lines and its `go.mod`.
+  The tags up to v0.2.0 stay in the repository as history; under the new path the Go command refuses them, since
+  their `go.mod` names the old path.
+- `testdb`: `RestoreLikeInfra` dumps without the rows of unlogged tables (`--no-unlogged-table-data`), as
+  infrastructure's dump does. An unlogged table arrives in the copy empty.
+
+Fixed:
+
+- `testdb`: `RestoreLikeInfra`'s server-side programs (pg_dump, pg_restore, the dump's removal) get no rows, so a
+  program that exits without reading its input can no longer fail the restore with a broken pipe. A failing program
+  still fails the test, naming it.
+
+Additive:
+
+- `standin`: `StandIn.Profile`, the profile a stand-in was made with.
+
+Internal: the embedded Compose files are named `compose.<service>.yaml`.
+
 ## v0.2.0
 
 Breaking, for every product on the module (bff follows in its switch; the agent and Membership start on v0.2):

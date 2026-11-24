@@ -1,6 +1,6 @@
 # commons
 
-Shared Go code of the owner's products, imported as `git.kloudbox.de/commons/commons` (private). Today it holds test
+Shared Go code of the owner's products, imported as `github.com/zh0platform/commons`. Today it holds test
 tooling: a runner that starts one run's own PostgreSQL (and, if asked, Keycloak and Chromium) as a Compose project and
 runs a command against it, per-test databases cloned from a template, a PostgreSQL protocol relay for lost-commit
 tests, a test certificate authority, the key side of a test identity provider, Keycloak sign-in helpers and
@@ -10,7 +10,7 @@ second-factor codes.
 deployment's settings. Python or Node tooling. Production code arrives only after its own design.
 
 **What moves in.** Code moves in only when it is the same in several projects for a reason that is not the product.
-The owner decides, through the Commons Elephant. This module is no place for new code that one project needs: such
+The owner decides. This module is no place for new code that one project needs: such
 code stays in that project until a second one needs the same.
 
 ## Packages
@@ -58,23 +58,8 @@ GOWORK=$PWD/../commons.work go test ./...
 Without it, a product builds against the version its `go.mod` names, as CI does; `make qa` and `go mod tidy -diff`
 always test that version. A product's `go.mod` moves only to tags.
 
-**A product's Linux check before a push** runs in a container without credentials: download the module on the Mac
-first (`go mod download`), then mount the Mac's module download cache read-only into the container as a file proxy,
-for example `-v "$(go env GOMODCACHE)/cache/download:/proxy:ro" -e GOPROXY=file:///proxy -e GOFLAGS=-mod=readonly`.
-`go.sum` verifies the module; no `GOPRIVATE` inside the container.
-
-**A product's CI** sets `GOPRIVATE=git.kloudbox.de/commons/*` in its Makefile and in each job, and fetches the module in
-one step before anything compiles, with no stored secret:
-
-1. The owner creates, for the product's repository, a Forgejo "authorized integration" (Settings, Authorized
-   Integrations, type Forgejo Actions (Local)): source repository the product's, capability `repository: Read` on
-   `Commons/commons` only. Its audience is not a secret.
-2. The workflow sets `enable-openid-connect: true`. The step first runs `go mod download git.kloudbox.de/commons/commons`
-   without a credential (a warm module cache answers); on a miss it fetches the job's token
-   (`$ACTIONS_ID_TOKEN_REQUEST_URL&audience=<audience>` with `Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN`)
-   and repeats the download with `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=http.https://git.kloudbox.de/commons/commons.git.extraheader`
-   and `GIT_CONFIG_VALUE_0="Authorization: Bearer <token>"` in that command's environment only. The key ends in `.git`:
-   git matches a URL prefix at slash boundaries. bff's `scripts/fetch-commons.sh` is a complete example.
+**A product's CI and its Linux check before a push** need nothing for commons: no `GOPRIVATE`, no token. The module
+comes through proxy.golang.org and is verified by sum.golang.org with Go's default settings.
 
 **Leftovers of killed runs.** A run killed hard (SIGKILL, a cancelled CI job) leaves its project and folder; the next
 start of the same product on the same machine prints, for each, a line with the commands that remove it, such as
@@ -116,3 +101,6 @@ CI on a candidate tag (`vX.Y.Z-rc.N`) before the release tag goes on the same co
   connection the relay accepted is closed, also one blocked writing to a server that stopped reading. Tests:
   `testdb/testdb_database_test.go::TestDatabaseAndRelayEndWithTheirTest`,
   `testdb/forwarder_test.go::TestRelayToAServerThatStoppedReadingEndsWithItsTest`
+- **error mapping**: Restore programs. `RestoreLikeInfra`'s server-side programs get no rows, so one that exits without
+  reading its input cannot fail the restore; a program that fails fails the test, naming it. Tests:
+  `testdb/testdb_database_test.go::TestServerProgramsAreJudgedByTheirExitStatus`

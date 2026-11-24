@@ -50,9 +50,9 @@ import (
 	"syscall"
 	"time"
 
-	"git.kloudbox.de/commons/commons/keycloak"
-	"git.kloudbox.de/commons/commons/nettest"
-	"git.kloudbox.de/commons/commons/testdb"
+	"github.com/zh0platform/commons/keycloak"
+	"github.com/zh0platform/commons/nettest"
+	"github.com/zh0platform/commons/testdb"
 )
 
 // The services and container ports of the stack.

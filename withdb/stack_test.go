@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"git.kloudbox.de/commons/commons/internal/selftest"
+	"github.com/zh0platform/commons/internal/selftest"
 )
 
 // runBound is how long a run may take to print a line or to end: above the runner's own start bound (8 minutes,
