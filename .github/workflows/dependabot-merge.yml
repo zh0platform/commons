@@ -1,10 +1,10 @@
 name: Dependabot merge
 
 # Asks GitHub to merge Dependabot's grouped minor and patch pull requests, version and security updates, by themselves.
-# GitHub merges once the required checks (qa on both runners, Secrets) are green on a branch up to date with main.
+# GitHub merges once the required checks (qa on both runners, Secrets) are green; their runs tested the pull request
+# merged with main as main was then.
 # Majors, Keycloak (left out of the groups in dependabot.yml) and every pull request a person opened wait for a person.
-# Only organization admins can push to a Dependabot branch here, and the required checks run on the merged tree, so no
-# commit count is checked. The job checks out nothing and uses no action.
+# Only organization admins can push to a Dependabot branch here, so no commit count is checked. The job checks out nothing and uses no action.
 on: pull_request
 
 permissions:

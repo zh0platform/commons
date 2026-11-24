@@ -77,15 +77,16 @@ func TestRestoreLikeInfraClosesTheCopyToTheGivenLogins(t *testing.T) {
 	}
 	restored := source.RestoreLikeInfra(t, selftest.MigrateLogin)
 	var markers, scratch int
-	var runtimeConnects bool
+	var migrateConnects, runtimeConnects bool
 	if err := restored.Admin(t).QueryRow(context.Background(), `SELECT (SELECT count(*) FROM agent.marker),
-		(SELECT count(*) FROM agent.scratch), has_database_privilege($1, current_database(), 'CONNECT')`,
-		selftest.RuntimeLogin).Scan(&markers, &scratch, &runtimeConnects); err != nil {
+		(SELECT count(*) FROM agent.scratch), has_database_privilege($1, current_database(), 'CONNECT'),
+		has_database_privilege($2, current_database(), 'CONNECT')`, selftest.MigrateLogin, selftest.RuntimeLogin).
+		Scan(&markers, &scratch, &migrateConnects, &runtimeConnects); err != nil {
 		t.Fatal(err)
 	}
-	if markers != 1 || scratch != 0 || runtimeConnects {
-		t.Errorf("restored copy: %d marker rows, %d unlogged rows, CONNECT for the runtime login %v; want 1, 0, false",
-			markers, scratch, runtimeConnects)
+	if markers != 1 || scratch != 0 || !migrateConnects || runtimeConnects {
+		t.Errorf("restored copy: %d marker rows, %d unlogged rows, CONNECT for the given login %v and the runtime login %v; want 1, 0, true, false",
+			markers, scratch, migrateConnects, runtimeConnects)
 	}
 }
 

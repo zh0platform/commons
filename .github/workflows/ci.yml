@@ -23,7 +23,8 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     # The job runs on the runner itself, not in a job container: the tests start their stacks with Docker Compose and
-    # reach them on the runner's loopback ports. The bound is set from the first measured runs on these runners.
+    # reach them on the runner's loopback ports. Measured 2026-11-24, cold: 2 m 24 s on amd64, 1 m 50 s on arm64; the
+    # bound leaves room for the stack test's own 20 minutes on a slow machine (Makefile, stack).
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

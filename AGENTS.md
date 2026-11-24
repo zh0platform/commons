@@ -11,7 +11,8 @@ Run `make fix`, then `make qa`. New or changed tests must also pass `make flake 
 
 - Only code that is the same in several projects for a reason that is not the product, after the owner's decision
   (README, "What moves in"). No product's name, tables, settings or logic: a product describes itself in a
-  `testdb.Product`; `make names` (part of `make qa`) fails on a product's name in any Go or YAML file.
+  `testdb.Product`; `make names` (part of `make qa`) fails on a product's name in any Go, YAML, shell, TOML or
+  template file.
 - An exported name is a contract with every product: change one only with a new minor version and a note in
   `CHANGELOG.md`, and say which products must follow.
 

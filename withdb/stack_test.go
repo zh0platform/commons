@@ -90,16 +90,19 @@ func cases(t *testing.T, runner, temp string) {
 				tc.signal(t, r)
 			}
 			status := r.wait(t)
+			// A failure prints the run's output, except when it holds a password: then nothing of it.
+			out := r.output()
+			if strings.Contains(out, "PASSWORD '") {
+				t.Errorf("output holds a password-carrying statement (output withheld)")
+				out = "(withheld)"
+			}
 			if status != tc.status {
-				t.Errorf("exit status %d, want %d; output:\n%s", status, tc.status, r.output())
+				t.Errorf("exit status %d, want %d; output:\n%s", status, tc.status, out)
 			}
 			for _, want := range tc.output {
 				if !strings.Contains(r.output(), want) {
-					t.Errorf("output lacks %q:\n%s", want, r.output())
+					t.Errorf("output lacks %q:\n%s", want, out)
 				}
-			}
-			if strings.Contains(r.output(), "PASSWORD '") {
-				t.Errorf("output holds a password-carrying statement:\n%s", r.output())
 			}
 			assertGone(t, r)
 		})
