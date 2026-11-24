@@ -372,6 +372,15 @@ func (v runnerVariable) in(p Product) string {
 	return runnerVariables[v].name
 }
 
+// runnerNames are the names of every variable the runner sets: the server's, then runnerVariables'.
+func runnerNames(p Product) []string {
+	names := p.ServerVariables()
+	for v := range runnerVariableCount {
+		names = append(names, v.in(p))
+	}
+	return names
+}
+
 // keycloakAlias is Keycloak's name on the stack's network (compose.keycloak.yaml), on the server certificate.
 const keycloakAlias = "idp.test"
 
@@ -535,15 +544,12 @@ func (s *stack) stopSignals() {
 // without every name the runner sets, so a shell that ran or exported another run's settings cannot point this run
 // at that run's servers.
 func inherited(p Product) []string {
-	runnerNames := p.ServerVariables()
-	for v := range runnerVariableCount {
-		runnerNames = append(runnerNames, v.in(p))
-	}
+	names := runnerNames(p)
 	var kept []string
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		refused := p.Refused != nil && p.Refused(name)
-		if !refused && !strings.HasPrefix(name, "COMPOSE_") && !slices.Contains(runnerNames, name) {
+		if !refused && !strings.HasPrefix(name, "COMPOSE_") && !slices.Contains(names, name) {
 			kept = append(kept, entry)
 		}
 	}

@@ -69,16 +69,20 @@ func TestPlaintextRuleNamesItsLogins(t *testing.T) {
 
 // A shell that ran another run of the product, or exported its settings or Compose's own, must not point this run's
 // processes at that run's servers or change which services Compose starts; a setting the runner does not manage
-// passes through. Every name the runner sets is checked, so one added without the filter fails here.
+// passes through. The names the runner sets are the ones it filters (runnerNames); the test pins that the known ones
+// are among them and that none lacks its name in the table.
 func TestInheritedDropsRunnerSettingsComposeAndRefusedVariables(t *testing.T) {
 	product := selftest.Product(t.TempDir())
-	names := slices.Concat(product.ServerVariables(), withdb.RunnerVariableNames(product),
-		[]string{"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "SHOP_TYPO"})
+	names := slices.Concat(withdb.RunnerNames(product), []string{"COMPOSE_PROFILES", "COMPOSE_FILE", "PGHOST", "SHOP_TYPO"})
 	for _, name := range []string{"SHOPTEST_DB_CA", "SHOPTEST_ADMIN_PASSWORD", "SHOPTEST_SERVER_CERT", "SHOPTEST_SERVER_SPKI",
 		"SHOPTEST_PG_HBA", "SHOPTEST_DEVTOOLS", "KEYCLOAK_TEST_URL", "KEYCLOAK_REALMS"} {
 		if !slices.Contains(names, name) {
 			t.Fatalf("the runner's names %v lack %s", names, name)
 		}
+	}
+	// A variable added to the enumeration without a name in the table would be the bare prefix.
+	if slices.Contains(names, product.Variables) {
+		t.Fatalf("the runner's names %v hold the bare prefix: a variable has no name in the table", names)
 	}
 	for _, name := range names {
 		t.Setenv(name, "another-run")
