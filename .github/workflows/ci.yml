@@ -1,0 +1,38 @@
+name: CI
+
+# Every push to main and every pull request runs every check: no path filter, so the required checks always report.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to a pull request cancels its superseded run. Each push to main has a group of its own (its run) and is
+# never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    # The job runs on the runner itself, not in a job container: the tests start their stacks with Docker Compose and
+    # reach them on the runner's loopback ports. The bound is set from the first measured runs on these runners.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - run: make install-betterleaks
+      - name: make qa (format, vet, lint, names, allow lists, tests, the runner as a process, govulncheck)
+        run: make qa

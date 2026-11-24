@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+# The only Betterleaks allow list (README, "Allow lists"). An entry is exactly:
+#
+#   [[allowlists]]
+#   description = "BL-<n>: <reason, naming the rule it silences>; expires=YYYY-MM-DD"
+#   paths = ['^<one file, an anchored literal>$']
+#   regexes = ['^<one exact value, an anchored literal>$']
+#   condition = "AND"
+#
+# Entries are global, not scoped to a rule with targetRules, because Betterleaks v1.10.1 silently drops rule-scoped
+# entries (betterleaks/betterleaks#300); they return to rule scope with the v2 bump. make allowlists checks the layout.

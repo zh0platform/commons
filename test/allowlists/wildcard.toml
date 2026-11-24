@@ -1,0 +1,10 @@
+# expect: BL-1: regex not an anchored literal
+[extend]
+useDefault = true
+# Entries are global (betterleaks/betterleaks#300).
+
+[[allowlists]]
+description = "BL-1: generic-api-key on a test placeholder; expires=2999-01-31"
+paths = ['^internal/example_test\.go$']
+regexes = ['.*']
+condition = "AND"

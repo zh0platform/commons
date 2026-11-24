@@ -1,0 +1,58 @@
+# One grouped minor/patch pull request per ecosystem each Monday, 7 days after a release; security updates at once
+# (the cooldown never delays them), grouped the same way; majors one by one for a person. Group pull requests merge by
+# themselves once the required checks are green (.github/workflows/dependabot-merge.yml matches the group names).
+# Keycloak stays out of the groups: each of its updates, patches included, waits for a person, since a minor can carry
+# database migrations. Not seen here, checked by hand at each release (README, "Releases"): gomutants, golangci-lint,
+# Betterleaks, govulncheck and the Go toolchain.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      security-minor-and-patch:
+        applies-to: security-updates
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      security-minor-and-patch:
+        applies-to: security-updates
+        update-types: [minor, patch]
+  - package-ecosystem: docker-compose
+    directory: /withdb
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+        exclude-patterns: [keycloak/keycloak]
+      security-minor-and-patch:
+        applies-to: security-updates
+        update-types: [minor, patch]
+        exclude-patterns: [keycloak/keycloak]

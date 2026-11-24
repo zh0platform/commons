@@ -41,11 +41,25 @@ documentation; they carry the product's prefix.
 
 ## Development
 
-`make fix` formats and tidies; `make qa` runs every check: format, vet, lint, `go mod tidy -diff`, the check that no Go
-or YAML file names a product (`make names`), the unit, database and Keycloak tests on one stack under the module's own
-runner (`make tests`; `make unit` and `make keycloak` run them apart), and the runner as a real process (`make
-stack`). The tests need Docker. `make flake TESTS=<regexp>` repeats tests; `make mutate`
-runs mutation testing on the lines changed since `origin/main`.
+`make fix` formats and tidies; `make qa` runs every check: format, vet, lint, `go mod tidy -diff`, the check that no Go,
+YAML, shell, TOML or template file names a product (`make names`), the allow lists and their proof (below), the unit,
+database and Keycloak tests on one stack under the module's own runner (`make tests`; `make unit` and `make keycloak`
+run them apart), the runner as a real process (`make stack`) and govulncheck (`make vuln`). The tests need Docker;
+`make install-betterleaks` installs the pinned scanner the allow-list check runs. `make flake TESTS=<regexp>` repeats
+tests; `make mutate` runs mutation testing on the lines changed since `origin/main`. `make hooks` turns on the
+pre-commit hook, which scans what is staged for secrets and runs the fast checks.
+
+**CI** runs on every push to main and every pull request: `qa` on `ubuntu-24.04` and `ubuntu-24.04-arm`, and the
+Secrets scan of every commit since `SCAN_SINCE` (Makefile) on a full clone. A finding prints its rule, file:line and
+commit, never the value.
+
+**Allow lists.** A scanner finding is silenced only in `.betterleaks.toml` (secrets) or `.trivyignore.yaml` (kept for the
+shared check; the module ships no image). Each entry has an ID, a reason and an expiry, and fails `make qa` from its
+expiry date; a Betterleaks entry names one file and one exact value. A real secret is rotated, never listed.
+
+**Updates.** Dependabot proposes Go modules, the workflows' actions and the three Compose images weekly, 7 days after a
+release; security updates at once. Grouped minor and patch updates merge by themselves once the checks are green;
+majors and Keycloak wait for a person.
 
 **Developing commons together with a product.** The workspace root holds an ignored workspace file, `commons.work`
 (with its `commons.work.sum`), that lists the product and `commons`. It is not named `go.work`, so no `go` command
@@ -68,9 +82,14 @@ automatically.
 
 ## Releases
 
-Versions are tags `vMAJOR.MINOR.PATCH`, protected and never moved. While the module is `v0`, a breaking change to an
-exported name is a new minor version with a note in `CHANGELOG.md` for its users. A release is proven by a product's
-CI on a candidate tag (`vX.Y.Z-rc.N`) before the release tag goes on the same commit.
+Versions are tags `vMAJOR.MINOR.PATCH`, created only by the organization's admins and never moved or deleted: a wrong
+release is followed by a higher version. While the module is `v0`, a breaking change to an exported name is a new
+minor version with a note in `CHANGELOG.md` for its users. A release is proven by a product's CI on a candidate tag
+(`vX.Y.Z-rc.N`) before the release tag goes on the same commit, whose own CI run is green.
+
+Checked by hand before each release, since Dependabot does not see them, each only 7 days after its own release:
+gomutants (Makefile), golangci-lint (`scripts/check-tools.sh`), Betterleaks and govulncheck (Makefile) and the Go
+toolchain (Makefile and `.github/workflows/ci.yml`).
 
 ## Guarantees
 

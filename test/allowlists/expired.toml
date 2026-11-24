@@ -1,0 +1,10 @@
+# expect: BL-1: expired on 2020-01-31
+[extend]
+useDefault = true
+# Entries are global (betterleaks/betterleaks#300).
+
+[[allowlists]]
+description = "BL-1: generic-api-key on a test placeholder; expires=2020-01-31"
+paths = ['^internal/example_test\.go$']
+regexes = ['^not-a-real-key$']
+condition = "AND"

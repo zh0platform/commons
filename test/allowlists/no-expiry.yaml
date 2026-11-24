@@ -1,0 +1,4 @@
+# expect: entry at line 3: missing field expired_at
+vulnerabilities:
+  - id: CVE-2022-37434
+    statement: "zlib in an unused base layer"

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+make -s secrets-staged fmt-check vet
+bin/golangci-lint run --fast-only
