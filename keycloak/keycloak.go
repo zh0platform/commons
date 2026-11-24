@@ -1,6 +1,6 @@
-// Package keycloak is test support for a Keycloak started from keycloak.yaml: where it is, a client that trusts it,
-// what a realm file declares, and a sign-in through Keycloak's own login form with an HTTP client. It names nothing of
-// the project using it.
+// Package keycloak is test support for a Keycloak started from compose.keycloak.yaml: where it is, a client that
+// trusts it, what a realm file declares, and a sign-in through Keycloak's own login form with an HTTP client. It names
+// nothing of the project using it.
 package keycloak
 
 import (

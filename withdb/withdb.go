@@ -86,7 +86,7 @@ const (
 	callBound = 30 * time.Second
 )
 
-//go:embed postgres.yaml keycloak.yaml chrome.yaml
+//go:embed compose.postgres.yaml compose.keycloak.yaml compose.chrome.yaml
 var embedded embed.FS
 
 // stack is one run's started Compose project.
@@ -261,13 +261,13 @@ func (s *stack) writeFiles() (testdb.Server, error) {
 	} {
 		s.composeEnv = append(s.composeEnv, p.Variables+value.suffix+"="+value.value)
 	}
-	names := []string{"postgres.yaml"}
+	names := []string{"compose.postgres.yaml"}
 	if p.Realms != "" {
-		names = append(names, "keycloak.yaml")
+		names = append(names, "compose.keycloak.yaml")
 		s.composeEnv = append(s.composeEnv, realmsVariable+"="+p.Realms)
 	}
 	if p.Browser {
-		names = append(names, "chrome.yaml")
+		names = append(names, "compose.chrome.yaml")
 	}
 	for _, name := range names {
 		content, err := embedded.ReadFile(name)
@@ -299,7 +299,7 @@ const (
 	root           = "ROOT"
 	devTools       = "DEVTOOLS" // the command's, the address of Chromium's DevTools
 	realmsVariable = "KEYCLOAK_REALMS"
-	// keycloakAlias is Keycloak's name on the stack's network (keycloak.yaml), on the server certificate.
+	// keycloakAlias is Keycloak's name on the stack's network (compose.keycloak.yaml), on the server certificate.
 	keycloakAlias = "idp.test"
 )
 
