@@ -3,6 +3,11 @@
 Versions follow semantic versioning. While the module is `v0`, a breaking change to an exported name is a new minor
 version, noted here for its users.
 
+## v0.4.1
+
+- `withdb`: the Keycloak image is 26.8.2-3, which carries the JDK fix for Java4Shell (CVE-2026-114938, a pre-auth
+  heap overflow on x86-64 CPUs with `avx512vbmi`); 26.8.2-2 is affected where CI runs on such hosts. No API change.
+
 ## v0.4.0
 
 Breaking, for every product on the module (bff follows in its switch; the agent and Membership in their own stories):
